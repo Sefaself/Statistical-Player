@@ -1,0 +1,10 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+*.log
+settings.local.toml
+cache/
+backups/
+.DS_Store
+Thumbs.db
