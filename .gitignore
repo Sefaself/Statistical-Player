@@ -1,4 +1,5 @@
 /target
+test-music/
 *.db
 *.db-shm
 *.db-wal

@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 use symphonia::core::audio::GenericAudioBufferRef;
 use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::well_known::{
+    CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3, CODEC_ID_PCM_F32BE,
+    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_S8, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
+    CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32BE, CODEC_ID_PCM_S32LE,
+    CODEC_ID_PCM_U8, CODEC_ID_VORBIS,
+};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
@@ -105,9 +111,20 @@ impl AudioSource {
                 .map(|n_frames| StdDuration::from_secs_f64(n_frames as f64 / sample_rate as f64))
         };
 
-        let codec_name = format!("{:?}", audio_params.codec)
-            .replace("AudioCodecId(0x", "")
-            .replace(')', "");
+        let codec_name = match audio_params.codec {
+            CODEC_ID_FLAC => "FLAC".to_string(),
+            CODEC_ID_MP3 => "MP3".to_string(),
+            CODEC_ID_AAC => "AAC".to_string(),
+            CODEC_ID_VORBIS => "Vorbis".to_string(),
+            CODEC_ID_ALAC => "ALAC".to_string(),
+            CODEC_ID_PCM_S16LE | CODEC_ID_PCM_S16BE | CODEC_ID_PCM_S24LE | CODEC_ID_PCM_S24BE
+            | CODEC_ID_PCM_S32LE | CODEC_ID_PCM_S32BE | CODEC_ID_PCM_F32LE | CODEC_ID_PCM_F32BE
+            | CODEC_ID_PCM_S8 | CODEC_ID_PCM_U8 => "PCM".to_string(),
+            other => {
+                let raw = format!("{other:?}");
+                raw.replace("AudioCodecId(0x", "").replace(')', "")
+            }
+        };
 
         let decoder_opts = AudioDecoderOptions::default();
 
