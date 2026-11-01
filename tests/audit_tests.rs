@@ -98,10 +98,30 @@ fn test_audit_fixtures_directory() {
         .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("notags.mp3"));
     assert!(has_notags, "notags.mp3 should be reported as missing tags");
 
+    // Verify AAC audio object types
+    assert!(
+        report.aac_profile_counts.contains_key("LC"),
+        "Missing AAC LC profile in report: {:?}",
+        report.aac_profile_counts
+    );
+
+    // Verify WAV files are not counted as missing tags
+    let has_wav_missing_tag = report.missing_tag_files.iter().any(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("wav"))
+            .unwrap_or(false)
+    });
+    assert!(
+        !has_wav_missing_tag,
+        "WAV files must not be reported as missing tags"
+    );
+
     // Verify markdown report generation
     assert!(report_file.exists(), "Markdown report was not written");
     let content = std::fs::read_to_string(&report_file).unwrap();
     assert!(content.contains("# Library Audit Report"));
     assert!(content.contains("Codec Distribution"));
+    assert!(content.contains("AAC Audio Object Types"));
     assert!(content.contains("Sample Rate Distribution"));
 }

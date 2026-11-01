@@ -1,34 +1,40 @@
 # Library Audit Report
 
 - **Target Folder:** `tests/fixtures`
-- **Total Audio Files Found:** 9
-- **Successfully Opened & Decoded (~1s):** 7
+- **Total Audio Files Found:** 8
+- **Successfully Opened & Decoded (~1s):** 6
 - **Open / Probe Failures:** 2
 - **Decode Failures:** 0
-- **Files Missing Tags:** 4
+- **Files Missing Tags:** 3
 
 ## Codec Distribution
 
 | Codec | Count | Share |
 | :--- | :--- | :--- |
-| AAC | 1 | 14.3% |
-| FLAC | 2 | 28.6% |
-| MP3 | 2 | 28.6% |
-| PCM | 2 | 28.6% |
+| AAC | 1 | 16.7% |
+| FLAC | 2 | 33.3% |
+| MP3 | 2 | 33.3% |
+| PCM | 1 | 16.7% |
+
+## AAC Audio Object Types
+
+| Profile / Audio Object Type | Count | Share |
+| :--- | :--- | :--- |
+| LC | 1 | 100.0% |
 
 ## Sample Rate Distribution
 
 | Sample Rate | Count | Share |
 | :--- | :--- | :--- |
-| 44100 Hz | 7 | 100.0% |
+| 44100 Hz | 6 | 100.0% |
 
 ## Bit Depth Distribution
 
 | Bit Depth | Count | Share |
 | :--- | :--- | :--- |
-| 16-bit | 3 | 42.9% |
-| 24-bit | 1 | 14.3% |
-| N/A (lossy) | 3 | 42.9% |
+| 16-bit | 2 | 33.3% |
+| 24-bit | 1 | 16.7% |
+| N/A (lossy) | 3 | 50.0% |
 
 ## Files That Failed to Open / Probe
 
@@ -45,6 +51,5 @@
 
 - `tests/fixtures\empty.mp3`
 - `tests/fixtures\notags.mp3`
-- `tests/fixtures\test_sine_44100.wav`
 - `tests/fixtures\truncated.mp3`
 

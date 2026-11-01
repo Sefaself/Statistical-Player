@@ -5,6 +5,7 @@ test-music/
 *.db-wal
 *.log
 settings.local.toml
+*.local.md
 cache/
 backups/
 .DS_Store

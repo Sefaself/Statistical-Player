@@ -39,6 +39,7 @@ pub enum FileAuditStatus {
 pub struct FileAuditResult {
     pub path: PathBuf,
     pub codec: Option<String>,
+    pub aac_profile: Option<String>,
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u32>,
     pub has_tags: bool,
@@ -52,6 +53,7 @@ pub struct AuditReport {
     pub total_scanned: usize,
     pub total_successful: usize,
     pub codec_counts: BTreeMap<String, usize>,
+    pub aac_profile_counts: BTreeMap<String, usize>,
     pub sample_rate_counts: BTreeMap<u32, usize>,
     pub bit_depth_counts: BTreeMap<String, usize>,
     pub open_failures: Vec<(PathBuf, String)>,
@@ -64,8 +66,20 @@ impl AuditReport {
     pub fn record(&mut self, result: FileAuditResult) {
         self.total_scanned += 1;
 
-        if !result.has_tags {
+        let is_wav = result
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("wav"))
+            .unwrap_or(false);
+
+        // Do not report WAV files as missing tags (Section 4 & owner rule)
+        if !result.has_tags && !is_wav {
             self.missing_tag_files.push(result.path.clone());
+        }
+
+        if let Some(profile) = result.aac_profile {
+            *self.aac_profile_counts.entry(profile).or_insert(0) += 1;
         }
 
         match result.status {
@@ -121,6 +135,16 @@ impl AuditReport {
             }
         }
         out.push('\n');
+
+        if !self.aac_profile_counts.is_empty() {
+            let total_aac: usize = self.aac_profile_counts.values().sum();
+            out.push_str("--- AAC Audio Object Types (Profiles) ---\n");
+            for (profile, count) in &self.aac_profile_counts {
+                let pct = (*count as f64 / total_aac as f64) * 100.0;
+                out.push_str(&format!("  - {profile}: {count} ({pct:.1}%)\n"));
+            }
+            out.push('\n');
+        }
 
         out.push_str("--- Sample Rate Distribution ---\n");
         if self.sample_rate_counts.is_empty() {
@@ -230,6 +254,18 @@ impl AuditReport {
             out.push('\n');
         }
 
+        if !self.aac_profile_counts.is_empty() {
+            let total_aac: usize = self.aac_profile_counts.values().sum();
+            out.push_str("## AAC Audio Object Types\n\n");
+            out.push_str("| Profile / Audio Object Type | Count | Share |\n");
+            out.push_str("| :--- | :--- | :--- |\n");
+            for (profile, count) in &self.aac_profile_counts {
+                let pct = (*count as f64 / total_aac as f64) * 100.0;
+                out.push_str(&format!("| {profile} | {count} | {pct:.1}% |\n"));
+            }
+            out.push('\n');
+        }
+
         out.push_str("## Sample Rate Distribution\n\n");
         if self.sample_rate_counts.is_empty() {
             out.push_str("*(No sample rate data)*\n\n");
@@ -322,6 +358,139 @@ fn is_pcm_codec(id: AudioCodecId) -> bool {
     )
 }
 
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            bit_offset: 0,
+        }
+    }
+
+    fn read_bits(&mut self, n: usize) -> Option<u32> {
+        if self.bit_offset + n > self.data.len() * 8 {
+            return None;
+        }
+        let mut val = 0;
+        for _ in 0..n {
+            let byte = self.data[self.bit_offset / 8];
+            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
+            val = (val << 1) | (bit as u32);
+            self.bit_offset += 1;
+        }
+        Some(val)
+    }
+
+    fn remaining_bits(&self) -> usize {
+        (self.data.len() * 8).saturating_sub(self.bit_offset)
+    }
+}
+
+/// Parses AAC Audio Object Type (e.g. LC, HE-AAC, HE-AACv2) from MPEG-4 AudioSpecificConfig payload.
+pub fn parse_aac_aot(extra_data: Option<&[u8]>) -> String {
+    let Some(data) = extra_data else {
+        return "Cannot be determined (no extradata)".to_string();
+    };
+
+    if data.is_empty() {
+        return "Cannot be determined (empty extradata)".to_string();
+    }
+
+    let mut reader = BitReader::new(data);
+    let mut aot = match reader.read_bits(5) {
+        Some(val) => val,
+        None => return "Cannot be determined".to_string(),
+    };
+
+    if aot == 31 {
+        let ext = match reader.read_bits(6) {
+            Some(e) => e,
+            None => return "Cannot be determined".to_string(),
+        };
+        aot = 32 + ext;
+    }
+
+    let sampling_freq_idx = match reader.read_bits(4) {
+        Some(s) => s,
+        None => return format_base_aot(aot),
+    };
+
+    if sampling_freq_idx == 0x0f && reader.read_bits(24).is_none() {
+        return format_base_aot(aot);
+    }
+
+    let _channel_config = match reader.read_bits(4) {
+        Some(c) => c,
+        None => return format_base_aot(aot),
+    };
+
+    let mut is_sbr = aot == 5;
+    let mut is_ps = aot == 29;
+
+    // Explicit hierarchical SBR
+    if is_sbr && let Some(ext_sampling) = reader.read_bits(4) {
+        if ext_sampling == 0x0f {
+            let _ = reader.read_bits(24);
+        }
+        if let Some(base_aot) = reader.read_bits(5) {
+            aot = if base_aot == 31 {
+                32 + reader.read_bits(6).unwrap_or(0)
+            } else {
+                base_aot
+            };
+        }
+    }
+
+    // Check for backward-compatible explicit extension:
+    // syncExtensionType (11 bits) == 0x2b7
+    // extensionAudioObjectType (5 bits)
+    while reader.remaining_bits() >= 16 {
+        if let Some(sync) = reader.read_bits(11) {
+            if sync == 0x2b7 {
+                if let Some(ext_aot) = reader.read_bits(5) {
+                    if ext_aot == 5 {
+                        let has_sbr = reader.read_bits(1).unwrap_or(0);
+                        if has_sbr == 1 {
+                            is_sbr = true;
+                        }
+                    } else if ext_aot == 29 {
+                        is_ps = true;
+                    }
+                }
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if is_ps {
+        "HE-AACv2".to_string()
+    } else if is_sbr {
+        "HE-AAC".to_string()
+    } else {
+        format_base_aot(aot)
+    }
+}
+
+fn format_base_aot(aot: u32) -> String {
+    match aot {
+        2 => "LC".to_string(),
+        1 => "Main".to_string(),
+        3 => "SSR".to_string(),
+        4 => "LTP".to_string(),
+        5 => "HE-AAC".to_string(),
+        23 => "LD".to_string(),
+        29 => "HE-AACv2".to_string(),
+        39 => "ELD".to_string(),
+        other => format!("AOT {other}"),
+    }
+}
+
 /// Checks whether an audio file has valid metadata tags using Lofty.
 fn check_file_tags(path: &Path) -> bool {
     match lofty::read_from_path(path) {
@@ -346,6 +515,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
             return FileAuditResult {
                 path: path.to_path_buf(),
                 codec: None,
+                aac_profile: None,
                 sample_rate: None,
                 bit_depth: None,
                 has_tags,
@@ -370,6 +540,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
             return FileAuditResult {
                 path: path.to_path_buf(),
                 codec: None,
+                aac_profile: None,
                 sample_rate: None,
                 bit_depth: None,
                 has_tags,
@@ -387,6 +558,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
             return FileAuditResult {
                 path: path.to_path_buf(),
                 codec: None,
+                aac_profile: None,
                 sample_rate: None,
                 bit_depth: None,
                 has_tags,
@@ -416,6 +588,12 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
         }
     };
 
+    let aac_profile = if codec_name == "AAC" || audio_params.codec == CODEC_ID_AAC {
+        Some(parse_aac_aot(audio_params.extra_data.as_deref()))
+    } else {
+        None
+    };
+
     let decoder_opts = AudioDecoderOptions::default();
     let mut decoder =
         match symphonia::default::get_codecs().make_audio_decoder(&audio_params, &decoder_opts) {
@@ -424,6 +602,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
                 return FileAuditResult {
                     path: path.to_path_buf(),
                     codec: Some(codec_name),
+                    aac_profile,
                     sample_rate: Some(sample_rate),
                     bit_depth,
                     has_tags,
@@ -457,6 +636,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
                 return FileAuditResult {
                     path: path.to_path_buf(),
                     codec: Some(codec_name),
+                    aac_profile,
                     sample_rate: Some(sample_rate),
                     bit_depth,
                     has_tags,
@@ -478,6 +658,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
                 return FileAuditResult {
                     path: path.to_path_buf(),
                     codec: Some(codec_name),
+                    aac_profile,
                     sample_rate: Some(sample_rate),
                     bit_depth,
                     has_tags,
@@ -490,6 +671,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
                 return FileAuditResult {
                     path: path.to_path_buf(),
                     codec: Some(codec_name),
+                    aac_profile,
                     sample_rate: Some(sample_rate),
                     bit_depth,
                     has_tags,
@@ -503,6 +685,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
         return FileAuditResult {
             path: path.to_path_buf(),
             codec: Some(codec_name),
+            aac_profile,
             sample_rate: Some(sample_rate),
             bit_depth,
             has_tags,
@@ -513,6 +696,7 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
     FileAuditResult {
         path: path.to_path_buf(),
         codec: Some(codec_name),
+        aac_profile,
         sample_rate: Some(sample_rate),
         bit_depth,
         has_tags,

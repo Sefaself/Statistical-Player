@@ -12,11 +12,37 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && args[1] == "audit" {
         if args.len() < 3 {
-            eprintln!("Usage: cargo run -- audit <folder>");
+            eprintln!("Usage: cargo run -- audit <folder> [--out <path>]");
             std::process::exit(1);
         }
-        let folder = std::path::PathBuf::from(&args[2]);
-        let report_path = std::path::PathBuf::from("docs/audit-report.md");
+        let mut folder_path = None;
+        let mut out_path = None;
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "--out" {
+                i += 1;
+                if i < args.len() {
+                    out_path = Some(std::path::PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Missing value for --out");
+                    std::process::exit(1);
+                }
+            } else if folder_path.is_none() {
+                folder_path = Some(std::path::PathBuf::from(&args[i]));
+            }
+            i += 1;
+        }
+
+        let folder = match folder_path {
+            Some(f) => f,
+            None => {
+                eprintln!("Usage: cargo run -- audit <folder> [--out <path>]");
+                std::process::exit(1);
+            }
+        };
+
+        let report_path =
+            out_path.unwrap_or_else(|| std::path::PathBuf::from("docs/audit-report.md"));
         match statistical_player::library::run_audit(&folder, Some(&report_path)) {
             Ok(report) => {
                 println!("{}", report.render_console());
