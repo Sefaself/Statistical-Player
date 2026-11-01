@@ -189,7 +189,7 @@ impl AudioSink for CpalSink {
 
 /// Real-time audio render callback for `f32` buffers.
 #[inline(always)]
-fn render_callback_f32(
+pub fn render_callback_f32(
     data: &mut [f32],
     consumer: &mut rtrb::Consumer<f32>,
     shared: &CallbackShared,
@@ -255,7 +255,7 @@ fn render_callback_f32(
 
 /// Real-time audio render callback for `i16` buffers.
 #[inline(always)]
-fn render_callback_i16(
+pub fn render_callback_i16(
     data: &mut [i16],
     consumer: &mut rtrb::Consumer<f32>,
     shared: &CallbackShared,
@@ -319,7 +319,7 @@ fn render_callback_i16(
 
 /// Real-time audio render callback for `i32` buffers.
 #[inline(always)]
-fn render_callback_i32(
+pub fn render_callback_i32(
     data: &mut [i32],
     consumer: &mut rtrb::Consumer<f32>,
     shared: &CallbackShared,
