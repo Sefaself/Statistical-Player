@@ -21,6 +21,7 @@ This file records key technical choices, library additions, and justifications a
 | `crossbeam-channel` | Multi-producer multi-consumer command/event messaging | std channels lack cross-thread select and bounded performance | Industry standard concurrent channels | Phase 1 |
 | `lofty` | Audio tag and metadata parsing (ID3, Vorbis comments, MP4 atoms) | std has no tag parser; pure Rust with broad format support | Actively maintained, high-performance tagging library | Phase 1 |
 | `walkdir` | Recursive folder directory walking | std::fs lacks ergonomic recursive directory walking | Standard Rust recursive directory iterator | Phase 1 |
+| `ctrlc` | Cross-platform Ctrl+C signal handling for CLI subcommands | std has no cross-platform signal handling APIs | De-facto standard signal handler crate | Phase 1 |
 
 ## Architecture Decisions
 

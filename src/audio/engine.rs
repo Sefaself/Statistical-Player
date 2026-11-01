@@ -206,6 +206,10 @@ impl AudioEngine {
     pub fn current_metadata(&self) -> Option<&AudioMetadata> {
         self.current_source.as_ref().map(|s| s.metadata())
     }
+
+    pub fn sink_sample_rate(&self) -> u32 {
+        self.sink.sample_rate()
+    }
 }
 
 /// Helper wrapper so Arc<NullSink> can be boxed as dyn AudioSink.
