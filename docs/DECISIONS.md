@@ -15,6 +15,12 @@ This file records key technical choices, library additions, and justifications a
 | `tracing-appender` | Non-blocking file writer for persistent debug logs | Needed to write logs without stalling the main thread | Official tracing companion | Phase 0 |
 | `anyhow` | Application-level error handling | Ergonomic error reporting with context across layers | Universal Rust standard | Phase 0 |
 | `thiserror` | Strongly typed domain error enums | std error boilerplate is verbose and error-prone | Universal Rust standard | Phase 0 |
+| `symphonia` | Audio decoding (FLAC, MP3, AAC/M4A, WAV, Vorbis) | std has no audio decoding; pure Rust with zero C dependencies | Actively maintained, standard pure-Rust multimedia library | Phase 1 |
+| `cpal` | Low-level cross-platform audio I/O callback | std has no audio device access; WASAPI/CoreAudio/ALSA backend | De-facto standard Rust audio I/O crate | Phase 1 |
+| `rtrb` | Lock-free single-producer single-consumer ring buffer | std mutex/channels allocate or lock; strictly forbidden in audio callback | Lightweight, realtime-safe wait-free SPSC queue | Phase 1 |
+| `crossbeam-channel` | Multi-producer multi-consumer command/event messaging | std channels lack cross-thread select and bounded performance | Industry standard concurrent channels | Phase 1 |
+| `lofty` | Audio tag and metadata parsing (ID3, Vorbis comments, MP4 atoms) | std has no tag parser; pure Rust with broad format support | Actively maintained, high-performance tagging library | Phase 1 |
+| `walkdir` | Recursive folder directory walking | std::fs lacks ergonomic recursive directory walking | Standard Rust recursive directory iterator | Phase 1 |
 
 ## Architecture Decisions
 

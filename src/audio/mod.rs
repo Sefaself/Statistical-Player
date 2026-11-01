@@ -1,3 +1,9 @@
 //! Audio engine: decoder, ring buffers, resampler, output sink, and analysis taps.
 
-// Skeletons ready for Phase 1 audio engine
+pub mod engine;
+pub mod sink;
+pub mod source;
+
+pub use engine::AudioEngine;
+pub use sink::{AudioSink, CallbackShared, CpalSink, NullSink};
+pub use source::{AudioMetadata, AudioSource};
