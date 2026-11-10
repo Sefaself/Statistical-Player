@@ -23,7 +23,7 @@ fn test_audio_source_probe_and_read() {
     assert!(meta.duration.is_some());
 
     let mut buffer = vec![0.0_f32; 1024];
-    let read = source.read_stereo(&mut buffer);
+    let read = source.read_stereo(&mut buffer).expect("read_stereo failed");
 
     assert!(read > 0);
     assert_eq!(read % 2, 0, "Stereo samples must be read in pairs");
@@ -78,4 +78,33 @@ fn test_audio_engine_with_null_sink() {
         .expect("Seek failed");
     let seek_pos = engine.position();
     assert!(seek_pos.as_millis() >= 490 && seek_pos.as_millis() <= 510);
+}
+
+#[test]
+fn test_ogg_vorbis_pipeline_decoding() {
+    for fixture in &["vorbis_44100.ogg", "vorbis_48000.ogg"] {
+        let ogg_path = PathBuf::from("tests/fixtures").join(fixture);
+        let (mut engine, _null_sink) = AudioEngine::new_null(44100);
+
+        let meta = engine
+            .load_file(&ogg_path)
+            .unwrap_or_else(|e| panic!("Failed to load {fixture} into engine: {e}"));
+
+        assert_eq!(meta.codec_name, "Vorbis");
+        assert!(
+            engine.frames_written() > 0,
+            "{fixture} wrote 0 frames into engine"
+        );
+
+        let mut buf = vec![0.0_f32; 1024];
+        let mut source = AudioSource::open(&ogg_path)
+            .unwrap_or_else(|e| panic!("Failed to open AudioSource for {fixture}: {e}"));
+        let read = source
+            .read_stereo(&mut buf)
+            .unwrap_or_else(|e| panic!("read_stereo failed for {fixture}: {e}"));
+        assert!(
+            read > 0,
+            "AudioSource::read_stereo produced 0 frames for {fixture}"
+        );
+    }
 }

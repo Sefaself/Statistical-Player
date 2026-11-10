@@ -61,7 +61,23 @@ generate_fixture "wav_16bit.wav" -c:a pcm_s16le \
 # 6. MP3 with no tags
 generate_fixture "notags.mp3" -c:a libmp3lame -map_metadata -1
 
-# 7. Truncated file (128 bytes of MP3)
+# 7. OGG Vorbis 44.1 kHz
+generate_fixture "vorbis_44100.ogg" -c:a libvorbis -ar 44100 \
+    -metadata "title=Sine Vorbis 44.1k" \
+    -metadata "artist=Test Artist" \
+    -metadata "album=Fixture Album" \
+    -metadata "track=6" \
+    -metadata "date=2026"
+
+# 8. OGG Vorbis 48 kHz
+generate_fixture "vorbis_48000.ogg" -c:a libvorbis -ar 48000 \
+    -metadata "title=Sine Vorbis 48k" \
+    -metadata "artist=Test Artist" \
+    -metadata "album=Fixture Album" \
+    -metadata "track=7" \
+    -metadata "date=2026"
+
+# 9. Truncated file (128 bytes of MP3)
 head -c 128 "${SCRIPT_DIR}/mp3_test.mp3" > "${SCRIPT_DIR}/truncated.mp3"
 
 # 8. Empty file (0 bytes)

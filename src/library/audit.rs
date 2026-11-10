@@ -2,26 +2,16 @@
 //! of every audio file, checks for tags, and produces an audit report.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use lofty::file::TaggedFileExt;
 use lofty::tag::Accessor;
-use symphonia::core::codecs::CodecParameters;
-use symphonia::core::codecs::audio::well_known::{
-    CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3, CODEC_ID_PCM_F32BE,
-    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_S8, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
-    CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32BE, CODEC_ID_PCM_S32LE,
-    CODEC_ID_PCM_U8, CODEC_ID_VORBIS,
-};
-use symphonia::core::codecs::audio::{AudioCodecId, AudioDecoderOptions, CODEC_ID_NULL_AUDIO};
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::formats::probe::Hint;
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
-use symphonia::core::meta::MetadataOptions;
 use walkdir::WalkDir;
+
+use crate::audio::source::AudioSource;
+pub use crate::audio::source::parse_aac_aot;
 
 /// Status resulting from auditing a single audio file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,155 +332,6 @@ pub fn is_supported_audio_extension(path: &Path) -> bool {
     )
 }
 
-fn is_pcm_codec(id: AudioCodecId) -> bool {
-    matches!(
-        id,
-        CODEC_ID_PCM_S16LE
-            | CODEC_ID_PCM_S16BE
-            | CODEC_ID_PCM_S24LE
-            | CODEC_ID_PCM_S24BE
-            | CODEC_ID_PCM_S32LE
-            | CODEC_ID_PCM_S32BE
-            | CODEC_ID_PCM_F32LE
-            | CODEC_ID_PCM_F32BE
-            | CODEC_ID_PCM_S8
-            | CODEC_ID_PCM_U8
-    )
-}
-
-struct BitReader<'a> {
-    data: &'a [u8],
-    bit_offset: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            bit_offset: 0,
-        }
-    }
-
-    fn read_bits(&mut self, n: usize) -> Option<u32> {
-        if self.bit_offset + n > self.data.len() * 8 {
-            return None;
-        }
-        let mut val = 0;
-        for _ in 0..n {
-            let byte = self.data[self.bit_offset / 8];
-            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
-            val = (val << 1) | (bit as u32);
-            self.bit_offset += 1;
-        }
-        Some(val)
-    }
-
-    fn remaining_bits(&self) -> usize {
-        (self.data.len() * 8).saturating_sub(self.bit_offset)
-    }
-}
-
-/// Parses AAC Audio Object Type (e.g. LC, HE-AAC, HE-AACv2) from MPEG-4 AudioSpecificConfig payload.
-pub fn parse_aac_aot(extra_data: Option<&[u8]>) -> String {
-    let Some(data) = extra_data else {
-        return "Cannot be determined (no extradata)".to_string();
-    };
-
-    if data.is_empty() {
-        return "Cannot be determined (empty extradata)".to_string();
-    }
-
-    let mut reader = BitReader::new(data);
-    let mut aot = match reader.read_bits(5) {
-        Some(val) => val,
-        None => return "Cannot be determined".to_string(),
-    };
-
-    if aot == 31 {
-        let ext = match reader.read_bits(6) {
-            Some(e) => e,
-            None => return "Cannot be determined".to_string(),
-        };
-        aot = 32 + ext;
-    }
-
-    let sampling_freq_idx = match reader.read_bits(4) {
-        Some(s) => s,
-        None => return format_base_aot(aot),
-    };
-
-    if sampling_freq_idx == 0x0f && reader.read_bits(24).is_none() {
-        return format_base_aot(aot);
-    }
-
-    let _channel_config = match reader.read_bits(4) {
-        Some(c) => c,
-        None => return format_base_aot(aot),
-    };
-
-    let mut is_sbr = aot == 5;
-    let mut is_ps = aot == 29;
-
-    // Explicit hierarchical SBR
-    if is_sbr && let Some(ext_sampling) = reader.read_bits(4) {
-        if ext_sampling == 0x0f {
-            let _ = reader.read_bits(24);
-        }
-        if let Some(base_aot) = reader.read_bits(5) {
-            aot = if base_aot == 31 {
-                32 + reader.read_bits(6).unwrap_or(0)
-            } else {
-                base_aot
-            };
-        }
-    }
-
-    // Check for backward-compatible explicit extension:
-    // syncExtensionType (11 bits) == 0x2b7
-    // extensionAudioObjectType (5 bits)
-    while reader.remaining_bits() >= 16 {
-        if let Some(sync) = reader.read_bits(11) {
-            if sync == 0x2b7 {
-                if let Some(ext_aot) = reader.read_bits(5) {
-                    if ext_aot == 5 {
-                        let has_sbr = reader.read_bits(1).unwrap_or(0);
-                        if has_sbr == 1 {
-                            is_sbr = true;
-                        }
-                    } else if ext_aot == 29 {
-                        is_ps = true;
-                    }
-                }
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    if is_ps {
-        "HE-AACv2".to_string()
-    } else if is_sbr {
-        "HE-AAC".to_string()
-    } else {
-        format_base_aot(aot)
-    }
-}
-
-fn format_base_aot(aot: u32) -> String {
-    match aot {
-        2 => "LC".to_string(),
-        1 => "Main".to_string(),
-        3 => "SSR".to_string(),
-        4 => "LTP".to_string(),
-        5 => "HE-AAC".to_string(),
-        23 => "LD".to_string(),
-        29 => "HE-AACv2".to_string(),
-        39 => "ELD".to_string(),
-        other => format!("AOT {other}"),
-    }
-}
-
 /// Checks whether an audio file has valid metadata tags using Lofty.
 fn check_file_tags(path: &Path) -> bool {
     match lofty::read_from_path(path) {
@@ -505,12 +346,12 @@ fn check_file_tags(path: &Path) -> bool {
     }
 }
 
-/// Audits a single file: tests tag parsing with Lofty, probes format and decodes ~1s with Symphonia.
+/// Audits a single file: tests tag parsing with Lofty, probes format and decodes ~1s via `AudioSource`.
 pub fn audit_single_file(path: &Path) -> FileAuditResult {
     let has_tags = check_file_tags(path);
 
-    let file = match File::open(path) {
-        Ok(f) => f,
+    let mut source = match AudioSource::open(path) {
+        Ok(s) => s,
         Err(e) => {
             return FileAuditResult {
                 path: path.to_path_buf(),
@@ -519,163 +360,42 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
                 sample_rate: None,
                 bit_depth: None,
                 has_tags,
-                status: FileAuditStatus::OpenFailed(format!("Failed to open file: {e}")),
+                status: FileAuditStatus::OpenFailed(format!("{e:#}")),
             };
         }
     };
 
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let format_opts = FormatOptions::default();
-    let meta_opts = MetadataOptions::default();
-
-    let mut reader = match symphonia::default::get_probe().probe(&hint, mss, format_opts, meta_opts)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return FileAuditResult {
-                path: path.to_path_buf(),
-                codec: None,
-                aac_profile: None,
-                sample_rate: None,
-                bit_depth: None,
-                has_tags,
-                status: FileAuditStatus::OpenFailed(format!("Failed to probe format: {e}")),
-            };
-        }
-    };
-
-    let track = match reader.tracks().iter().find(|t| match &t.codec_params {
-        Some(CodecParameters::Audio(params)) => params.codec != CODEC_ID_NULL_AUDIO,
-        _ => false,
-    }) {
-        Some(t) => t,
-        None => {
-            return FileAuditResult {
-                path: path.to_path_buf(),
-                codec: None,
-                aac_profile: None,
-                sample_rate: None,
-                bit_depth: None,
-                has_tags,
-                status: FileAuditStatus::OpenFailed("No supported audio track found".to_string()),
-            };
-        }
-    };
-
-    let track_id = track.id;
-    let audio_params = match &track.codec_params {
-        Some(CodecParameters::Audio(params)) => params.clone(),
-        _ => unreachable!(),
-    };
-
-    let sample_rate = audio_params.sample_rate.unwrap_or(0);
-    let bit_depth = audio_params.bits_per_sample;
-    let codec_name = match audio_params.codec {
-        CODEC_ID_FLAC => "FLAC".to_string(),
-        CODEC_ID_MP3 => "MP3".to_string(),
-        CODEC_ID_AAC => "AAC".to_string(),
-        CODEC_ID_VORBIS => "Vorbis".to_string(),
-        CODEC_ID_ALAC => "ALAC".to_string(),
-        id if is_pcm_codec(id) => "PCM".to_string(),
-        other => {
-            let raw = format!("{other:?}");
-            raw.replace("AudioCodecId(0x", "").replace(')', "")
-        }
-    };
-
-    let aac_profile = if codec_name == "AAC" || audio_params.codec == CODEC_ID_AAC {
-        Some(parse_aac_aot(audio_params.extra_data.as_deref()))
-    } else {
-        None
-    };
-
-    let decoder_opts = AudioDecoderOptions::default();
-    let mut decoder =
-        match symphonia::default::get_codecs().make_audio_decoder(&audio_params, &decoder_opts) {
-            Ok(d) => d,
-            Err(e) => {
-                return FileAuditResult {
-                    path: path.to_path_buf(),
-                    codec: Some(codec_name),
-                    aac_profile,
-                    sample_rate: Some(sample_rate),
-                    bit_depth,
-                    has_tags,
-                    status: FileAuditStatus::OpenFailed(format!("Failed to create decoder: {e}")),
-                };
-            }
-        };
-
-    // Decode ~1 second of frames (or until end of stream)
-    let target_frames = if sample_rate > 0 {
-        sample_rate as u64
+    let meta = source.metadata().clone();
+    let target_frames = if meta.sample_rate > 0 {
+        meta.sample_rate as u64
     } else {
         44100
     };
+
+    // Decode ~1 second of frames (or until end of stream)
+    let mut scratch = [0.0_f32; 2048];
     let mut decoded_frames: u64 = 0;
-    let mut packet_index = 0;
 
     loop {
         if decoded_frames >= target_frames {
             break;
         }
 
-        let packet = match reader.next_packet() {
-            Ok(Some(p)) => p,
-            Ok(None) => break, // EOF reached before 1s (short file)
-            Err(symphonia::core::errors::Error::ResetRequired) => {
-                decoder.reset();
-                continue;
+        match source.read_stereo(&mut scratch) {
+            Ok(0) => break, // EOF reached before 1s (short file)
+            Ok(samples_read) => {
+                let frames = (samples_read / 2) as u64;
+                decoded_frames += frames;
             }
             Err(e) => {
                 return FileAuditResult {
                     path: path.to_path_buf(),
-                    codec: Some(codec_name),
-                    aac_profile,
-                    sample_rate: Some(sample_rate),
-                    bit_depth,
+                    codec: Some(meta.codec_name),
+                    aac_profile: meta.aac_profile,
+                    sample_rate: Some(meta.sample_rate),
+                    bit_depth: meta.bit_depth,
                     has_tags,
-                    status: FileAuditStatus::DecodeFailed(format!("Error reading packet: {e}")),
-                };
-            }
-        };
-
-        if packet.track_id != track_id {
-            continue;
-        }
-
-        match decoder.decode(&packet) {
-            Ok(buf) => {
-                decoded_frames += buf.frames() as u64;
-                packet_index += 1;
-            }
-            Err(symphonia::core::errors::Error::DecodeError(e)) => {
-                return FileAuditResult {
-                    path: path.to_path_buf(),
-                    codec: Some(codec_name),
-                    aac_profile,
-                    sample_rate: Some(sample_rate),
-                    bit_depth,
-                    has_tags,
-                    status: FileAuditStatus::DecodeFailed(format!(
-                        "Decode error in packet {packet_index}: {e}"
-                    )),
-                };
-            }
-            Err(e) => {
-                return FileAuditResult {
-                    path: path.to_path_buf(),
-                    codec: Some(codec_name),
-                    aac_profile,
-                    sample_rate: Some(sample_rate),
-                    bit_depth,
-                    has_tags,
-                    status: FileAuditStatus::DecodeFailed(format!("Decoder failure: {e}")),
+                    status: FileAuditStatus::DecodeFailed(format!("{e:#}")),
                 };
             }
         }
@@ -684,10 +404,10 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
     if decoded_frames == 0 {
         return FileAuditResult {
             path: path.to_path_buf(),
-            codec: Some(codec_name),
-            aac_profile,
-            sample_rate: Some(sample_rate),
-            bit_depth,
+            codec: Some(meta.codec_name),
+            aac_profile: meta.aac_profile,
+            sample_rate: Some(meta.sample_rate),
+            bit_depth: meta.bit_depth,
             has_tags,
             status: FileAuditStatus::DecodeFailed("Zero audio frames decoded".to_string()),
         };
@@ -695,10 +415,10 @@ pub fn audit_single_file(path: &Path) -> FileAuditResult {
 
     FileAuditResult {
         path: path.to_path_buf(),
-        codec: Some(codec_name),
-        aac_profile,
-        sample_rate: Some(sample_rate),
-        bit_depth,
+        codec: Some(meta.codec_name),
+        aac_profile: meta.aac_profile,
+        sample_rate: Some(meta.sample_rate),
+        bit_depth: meta.bit_depth,
         has_tags,
         status: FileAuditStatus::Success {
             frames_decoded: decoded_frames,

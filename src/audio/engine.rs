@@ -23,6 +23,7 @@ pub struct AudioEngine {
     frames_written: u64,
     track_end_frame: Option<u64>,
     scratch_buf: Vec<f32>,
+    last_error: Option<String>,
 }
 
 impl AudioEngine {
@@ -45,6 +46,7 @@ impl AudioEngine {
             frames_written: 0,
             track_end_frame: None,
             scratch_buf: vec![0.0_f32; 4096],
+            last_error: None,
         })
     }
 
@@ -62,6 +64,7 @@ impl AudioEngine {
             frames_written: 0,
             track_end_frame: None,
             scratch_buf: vec![0.0_f32; 4096],
+            last_error: None,
         };
 
         (engine, null_sink)
@@ -77,6 +80,7 @@ impl AudioEngine {
         self.frames_written = 0;
         self.shared.frames_consumed.store(0, Ordering::Relaxed);
         self.track_end_frame = None;
+        self.last_error = None;
 
         info!(
             "Loaded track: {} ({})",
@@ -105,7 +109,16 @@ impl AudioEngine {
                 break;
             }
 
-            let read = source.read_stereo(&mut self.scratch_buf[..to_read]);
+            let read = match source.read_stereo(&mut self.scratch_buf[..to_read]) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("AudioSource decode error: {e}");
+                    self.last_error = Some(e.to_string());
+                    self.track_end_frame = Some(self.frames_written);
+                    break;
+                }
+            };
+
             if read == 0 {
                 // End of track reached
                 if source.is_end_of_stream() && self.track_end_frame.is_none() {
@@ -209,6 +222,14 @@ impl AudioEngine {
 
     pub fn sink_sample_rate(&self) -> u32 {
         self.sink.sample_rate()
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub fn frames_written(&self) -> u64 {
+        self.frames_written
     }
 }
 

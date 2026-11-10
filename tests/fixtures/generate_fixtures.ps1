@@ -76,7 +76,27 @@ Generate-Fixture "notags.mp3" @(
     "-c:a", "libmp3lame", "-map_metadata", "-1"
 )
 
-# 7. Truncated file (128 bytes of MP3)
+# 7. OGG Vorbis 44.1 kHz
+Generate-Fixture "vorbis_44100.ogg" @(
+    "-c:a", "libvorbis", "-ar", "44100",
+    "-metadata", "title=Sine Vorbis 44.1k",
+    "-metadata", "artist=Test Artist",
+    "-metadata", "album=Fixture Album",
+    "-metadata", "track=6",
+    "-metadata", "date=2026"
+)
+
+# 8. OGG Vorbis 48 kHz
+Generate-Fixture "vorbis_48000.ogg" @(
+    "-c:a", "libvorbis", "-ar", "48000",
+    "-metadata", "title=Sine Vorbis 48k",
+    "-metadata", "artist=Test Artist",
+    "-metadata", "album=Fixture Album",
+    "-metadata", "track=7",
+    "-metadata", "date=2026"
+)
+
+# 9. Truncated file (128 bytes of MP3)
 $Mp3Path = Join-Path $ScriptDir "mp3_test.mp3"
 $TruncPath = Join-Path $ScriptDir "truncated.mp3"
 $Bytes = [System.IO.File]::ReadAllBytes($Mp3Path)

@@ -204,6 +204,17 @@ fn run_play_cli(file: &std::path::Path, seek: Option<std::time::Duration>) -> an
         }
 
         if engine.is_track_ended() {
+            if engine.frames_written() == 0 {
+                let err_msg = engine
+                    .last_error()
+                    .map(|e| format!("Track produced zero audio frames: {e}"))
+                    .unwrap_or_else(|| {
+                        "Track produced zero audio frames (file may be empty, corrupt, or unsupported)"
+                            .to_string()
+                    });
+                eprintln!("\nError: {err_msg}");
+                anyhow::bail!("{err_msg}");
+            }
             println!("\nEnd of track reached.");
             break;
         }
