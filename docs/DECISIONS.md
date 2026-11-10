@@ -22,6 +22,7 @@ This file records key technical choices, library additions, and justifications a
 | `lofty` | Audio tag and metadata parsing (ID3, Vorbis comments, MP4 atoms) | std has no tag parser; pure Rust with broad format support | Actively maintained, high-performance tagging library | Phase 1 |
 | `walkdir` | Recursive folder directory walking | std::fs lacks ergonomic recursive directory walking | Standard Rust recursive directory iterator | Phase 1 |
 | `ctrlc` | Cross-platform Ctrl+C signal handling for CLI subcommands | std has no cross-platform signal handling APIs | De-facto standard signal handler crate | Phase 1 |
+| `rubato` | High-quality audio sample rate conversion | std has no sample rate conversion or DSP sinc/FFT resampling algorithms | Realtime-safe sinc/FFT audio resampler specified in roadmap Section 5 & 7 | Phase 1 |
 
 ## Architecture Decisions
 

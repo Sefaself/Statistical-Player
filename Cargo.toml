@@ -13,6 +13,7 @@ eframe = "0.37.0"
 egui = "0.37.0"
 lofty = "0.25.4"
 rtrb = "0.4.0"
+rubato = "5.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 symphonia = { version = "0.6.1", features = ["aac", "mp3", "flac", "pcm", "vorbis", "alac", "isomp4"] }
 thiserror = "2.0.21"
