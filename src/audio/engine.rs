@@ -11,9 +11,14 @@ use crate::audio::resampler::AudioResampler;
 use crate::audio::sink::{AudioSink, CallbackShared, CpalSink, NullSink};
 use crate::audio::source::{AudioMetadata, AudioSource};
 
-/// Ring buffer capacity in stereo samples for ~200ms at 48kHz.
-/// 48,000 frames/sec * 2 samples/frame * 0.200 sec = 19,200 samples.
-pub const RING_BUFFER_CAPACITY: usize = 19_200;
+/// Ring buffer duration in seconds (1.5 s).
+pub const RING_BUFFER_DURATION_SECS: f64 = 1.5;
+
+/// Calculates ring buffer capacity in stereo samples for 1.5 seconds at the given device rate:
+/// 1.5 s * device_rate * 2 channels.
+pub fn ring_buffer_capacity(sample_rate: u32) -> usize {
+    (RING_BUFFER_DURATION_SECS * sample_rate as f64 * 2.0).ceil() as usize
+}
 
 /// Top-level audio engine.
 pub struct AudioEngine {
@@ -41,17 +46,17 @@ pub struct AudioEngine {
 impl AudioEngine {
     /// Creates an engine with a real CPAL hardware sink.
     pub fn new() -> Result<Self> {
-        let (producer, consumer) = rtrb::RingBuffer::new(RING_BUFFER_CAPACITY);
         let shared = Arc::new(CallbackShared::default());
-        let sink = Box::new(CpalSink::new(consumer, Arc::clone(&shared))?);
+        let (sink, producer) = CpalSink::new(Arc::clone(&shared))?;
 
         info!(
-            "Audio engine initialized with device sample rate: {} Hz",
-            sink.sample_rate()
+            "Audio engine initialized with device sample rate: {} Hz (ring buffer capacity: {} samples / 1.5s)",
+            sink.sample_rate(),
+            producer.slots()
         );
 
         Ok(Self {
-            sink,
+            sink: Box::new(sink),
             shared,
             producer,
             current_source: None,
@@ -75,7 +80,8 @@ impl AudioEngine {
 
     /// Creates an engine with a NullSink for automated tests or headless environments.
     pub fn new_null(sample_rate: u32) -> (Self, Arc<NullSink>) {
-        let (producer, consumer) = rtrb::RingBuffer::new(RING_BUFFER_CAPACITY);
+        let capacity = ring_buffer_capacity(sample_rate);
+        let (producer, consumer) = rtrb::RingBuffer::new(capacity);
         let shared = Arc::new(CallbackShared::default());
         let null_sink = Arc::new(NullSink::new(consumer, Arc::clone(&shared), sample_rate));
 

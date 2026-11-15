@@ -81,8 +81,8 @@ pub struct CpalSink {
 }
 
 impl CpalSink {
-    /// Opens the system default output device and builds an output stream.
-    pub fn new(mut consumer: rtrb::Consumer<f32>, shared: Arc<CallbackShared>) -> Result<Self> {
+    /// Opens the system default output device, creates a 1.5s ring buffer for the device rate, and builds an output stream.
+    pub fn new(shared: Arc<CallbackShared>) -> Result<(Self, rtrb::Producer<f32>)> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -96,6 +96,10 @@ impl CpalSink {
         let channels = default_config.channels();
         let sample_format = default_config.sample_format();
         let stream_config: StreamConfig = default_config.into();
+
+        // 1.5 s * device rate * 2 channels
+        let ring_capacity = (1.5 * sample_rate as f64 * 2.0).ceil() as usize;
+        let (producer, mut consumer) = rtrb::RingBuffer::new(ring_capacity);
 
         let shared_cb = Arc::clone(&shared);
 
@@ -157,12 +161,15 @@ impl CpalSink {
             .play()
             .context("Failed to start audio output stream")?;
 
-        Ok(Self {
-            _stream: stream,
-            sample_rate,
-            channels,
-            shared,
-        })
+        Ok((
+            Self {
+                _stream: stream,
+                sample_rate,
+                channels,
+                shared,
+            },
+            producer,
+        ))
     }
 
     pub fn shared(&self) -> &Arc<CallbackShared> {
