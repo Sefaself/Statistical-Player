@@ -19,6 +19,8 @@ pub struct CallbackShared {
     pub frames_consumed: AtomicU64,
     /// Discard target frame for lock-free flush on seek/track change.
     pub discard_target: AtomicU64,
+    /// Audio end frame: frames consumed beyond this represent device drain silence.
+    pub end_of_audio_frame: AtomicU64,
     /// Linear volume gain as f32 bits.
     pub volume_target_bits: AtomicU32,
     /// Counter of underrun occurrences.
@@ -36,6 +38,7 @@ impl Default for CallbackShared {
         Self {
             frames_consumed: AtomicU64::new(0),
             discard_target: AtomicU64::new(0),
+            end_of_audio_frame: AtomicU64::new(u64::MAX),
             volume_target_bits: AtomicU32::new(1.0_f32.to_bits()),
             underruns: AtomicU64::new(0),
             peak_l_bits: AtomicU32::new(0.0_f32.to_bits()),
@@ -238,6 +241,8 @@ pub fn render_callback_f32(
     let mut block_peak_l = 0.0_f32;
     let mut block_peak_r = 0.0_f32;
     let mut frames_rendered = 0_u64;
+    let initial_consumed = shared.frames_consumed.load(Ordering::Relaxed);
+    let end_of_audio = shared.end_of_audio_frame.load(Ordering::Relaxed);
 
     for i in 0..frames {
         // Ramp volume smoothly
@@ -267,10 +272,15 @@ pub fn render_callback_f32(
             data[i * 2 + 1] = out_r;
             frames_rendered += 1;
         } else {
-            // Buffer empty: silence and count underrun
+            // Buffer empty: silence
             data[i * 2] = 0.0;
             data[i * 2 + 1] = 0.0;
-            shared.underruns.fetch_add(1, Ordering::Relaxed);
+            let current_frame = initial_consumed + frames_rendered;
+            if current_frame < end_of_audio {
+                shared.underruns.fetch_add(1, Ordering::Relaxed);
+            } else {
+                frames_rendered += 1;
+            }
         }
     }
 
@@ -306,6 +316,8 @@ pub fn render_callback_i16(
     let mut block_peak_l = 0.0_f32;
     let mut block_peak_r = 0.0_f32;
     let mut frames_rendered = 0_u64;
+    let initial_consumed = shared.frames_consumed.load(Ordering::Relaxed);
+    let end_of_audio = shared.end_of_audio_frame.load(Ordering::Relaxed);
 
     for i in 0..frames {
         if *current_gain < target_gain {
@@ -336,7 +348,12 @@ pub fn render_callback_i16(
         } else {
             data[i * 2] = 0;
             data[i * 2 + 1] = 0;
-            shared.underruns.fetch_add(1, Ordering::Relaxed);
+            let current_frame = initial_consumed + frames_rendered;
+            if current_frame < end_of_audio {
+                shared.underruns.fetch_add(1, Ordering::Relaxed);
+            } else {
+                frames_rendered += 1;
+            }
         }
     }
 
@@ -372,6 +389,8 @@ pub fn render_callback_i32(
     let mut block_peak_l = 0.0_f32;
     let mut block_peak_r = 0.0_f32;
     let mut frames_rendered = 0_u64;
+    let initial_consumed = shared.frames_consumed.load(Ordering::Relaxed);
+    let end_of_audio = shared.end_of_audio_frame.load(Ordering::Relaxed);
 
     for i in 0..frames {
         if *current_gain < target_gain {
@@ -402,7 +421,12 @@ pub fn render_callback_i32(
         } else {
             data[i * 2] = 0;
             data[i * 2 + 1] = 0;
-            shared.underruns.fetch_add(1, Ordering::Relaxed);
+            let current_frame = initial_consumed + frames_rendered;
+            if current_frame < end_of_audio {
+                shared.underruns.fetch_add(1, Ordering::Relaxed);
+            } else {
+                frames_rendered += 1;
+            }
         }
     }
 
@@ -451,6 +475,8 @@ impl NullSink {
         let mut consumed = 0;
         let mut block_peak_l = 0.0_f32;
         let mut block_peak_r = 0.0_f32;
+        let initial_consumed = self.shared.frames_consumed.load(Ordering::Relaxed);
+        let end_of_audio = self.shared.end_of_audio_frame.load(Ordering::Relaxed);
 
         for _ in 0..frames {
             let l = consumer.pop();
@@ -460,8 +486,13 @@ impl NullSink {
                 block_peak_r = block_peak_r.max(r.abs());
                 consumed += 1;
             } else {
-                self.shared.underruns.fetch_add(1, Ordering::Relaxed);
-                break;
+                let current_frame = initial_consumed + consumed as u64;
+                if current_frame < end_of_audio {
+                    self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                    break;
+                } else {
+                    consumed += 1;
+                }
             }
         }
 

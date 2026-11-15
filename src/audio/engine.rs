@@ -20,6 +20,10 @@ pub fn ring_buffer_capacity(sample_rate: u32) -> usize {
     (RING_BUFFER_DURATION_SECS * sample_rate as f64 * 2.0).ceil() as usize
 }
 
+/// Fixed hardware drain tail duration (200 ms) to ensure the device DAC and OS audio mixer
+/// finish playing all buffered samples before declaring the track ended.
+pub const DRAIN_TAIL_DURATION: Duration = Duration::from_millis(200);
+
 /// Top-level audio engine.
 pub struct AudioEngine {
     sink: Box<dyn AudioSink>,
@@ -139,6 +143,22 @@ impl AudioEngine {
         Ok(metadata)
     }
 
+    fn mark_end_of_track(&mut self) {
+        if self.track_end_frame.is_none() {
+            let dev_rate = self.sink.sample_rate();
+            let drain_frames = (dev_rate as f64 * DRAIN_TAIL_DURATION.as_secs_f64()).ceil() as u64;
+            self.shared
+                .end_of_audio_frame
+                .store(self.frames_written, Ordering::Release);
+            self.track_end_frame = Some(self.frames_written + drain_frames);
+            debug!(
+                "Track reached end of stream at audio frame {}, drain target frame {}",
+                self.frames_written,
+                self.frames_written + drain_frames
+            );
+        }
+    }
+
     /// Fills the ring buffer from the current audio source.
     /// Returns `true` if audio is still actively decoding, `false` if finished.
     pub fn fill_buffer(&mut self) -> bool {
@@ -166,18 +186,14 @@ impl AudioEngine {
                     Err(e) => {
                         tracing::warn!("AudioSource decode error: {e}");
                         self.last_error = Some(e.to_string());
-                        self.track_end_frame = Some(self.frames_written);
+                        self.mark_end_of_track();
                         break;
                     }
                 };
 
                 if read == 0 {
-                    if source.is_end_of_stream() && self.track_end_frame.is_none() {
-                        self.track_end_frame = Some(self.frames_written);
-                        debug!(
-                            "Source reached end of stream at frame {}",
-                            self.frames_written
-                        );
+                    if source.is_end_of_stream() {
+                        self.mark_end_of_track();
                     }
                     break;
                 }
@@ -228,7 +244,7 @@ impl AudioEngine {
                     Err(e) => {
                         tracing::warn!("AudioSource decode error: {e}");
                         self.last_error = Some(e.to_string());
-                        self.track_end_frame = Some(self.frames_written);
+                        self.mark_end_of_track();
                         return false;
                     }
                 };
@@ -260,7 +276,7 @@ impl AudioEngine {
                     Err(e) => {
                         tracing::warn!("Resampler error: {e}");
                         self.last_error = Some(e.to_string());
-                        self.track_end_frame = Some(self.frames_written);
+                        self.mark_end_of_track();
                         return false;
                     }
                 };
@@ -305,7 +321,7 @@ impl AudioEngine {
                     Err(e) => {
                         tracing::warn!("Resampler partial flush error: {e}");
                         self.last_error = Some(e.to_string());
-                        self.track_end_frame = Some(self.frames_written);
+                        self.mark_end_of_track();
                         return false;
                     }
                 };
@@ -355,7 +371,7 @@ impl AudioEngine {
                     Err(e) => {
                         tracing::warn!("Resampler zero flush error: {e}");
                         self.last_error = Some(e.to_string());
-                        self.track_end_frame = Some(self.frames_written);
+                        self.mark_end_of_track();
                         return false;
                     }
                 };
@@ -377,13 +393,7 @@ impl AudioEngine {
                 && self.flushing_zeros_remaining == 0
                 && self.resample_out_offset >= self.resample_out_len
             {
-                if self.track_end_frame.is_none() {
-                    self.track_end_frame = Some(self.frames_written);
-                    debug!(
-                        "Resampled track reached end of stream at device frame {}",
-                        self.frames_written
-                    );
-                }
+                self.mark_end_of_track();
                 break;
             }
 
@@ -406,17 +416,29 @@ impl AudioEngine {
     /// Gets current playback position based on device frames consumed and timeline base.
     pub fn position(&self) -> Duration {
         let consumed = self.shared.frames_consumed.load(Ordering::Relaxed);
+        let end_of_audio = self.shared.end_of_audio_frame.load(Ordering::Relaxed);
+        let effective_consumed = consumed.min(end_of_audio);
         let dev_rate = self.sink.sample_rate();
         if dev_rate == 0 {
             return Duration::ZERO;
         }
 
-        if consumed <= self.timeline_base_frame {
+        let pos = if effective_consumed <= self.timeline_base_frame {
             self.timeline_base_time
         } else {
-            let elapsed_frames = consumed - self.timeline_base_frame;
+            let elapsed_frames = effective_consumed - self.timeline_base_frame;
             self.timeline_base_time
                 + Duration::from_secs_f64(elapsed_frames as f64 / dev_rate as f64)
+        };
+
+        if let Some(duration) = self
+            .current_source
+            .as_ref()
+            .and_then(|s| s.metadata().duration)
+        {
+            pos.min(duration)
+        } else {
+            pos
         }
     }
 
@@ -440,6 +462,9 @@ impl AudioEngine {
         self.shared
             .discard_target
             .store(self.frames_written, Ordering::Release);
+        self.shared
+            .end_of_audio_frame
+            .store(u64::MAX, Ordering::Release);
 
         if let Some(ref mut resampler) = self.current_resampler {
             resampler.reset();
@@ -495,6 +520,15 @@ impl AudioEngine {
 
     pub fn frames_written(&self) -> u64 {
         self.frames_written
+    }
+
+    pub fn track_end_frame(&self) -> Option<u64> {
+        self.track_end_frame
+    }
+
+    pub fn end_of_audio_frame(&self) -> Option<u64> {
+        let val = self.shared.end_of_audio_frame.load(Ordering::Relaxed);
+        if val == u64::MAX { None } else { Some(val) }
     }
 }
 

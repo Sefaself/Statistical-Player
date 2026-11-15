@@ -146,4 +146,23 @@ fn test_audio_callback_zero_allocations() {
         discard_allocs, 0,
         "drain_discard path allocated on heap ({discard_allocs} allocations)"
     );
+
+    // 8. Test drain tail path (buffer empty and frames_consumed >= end_of_audio_frame)
+    let consumed_now = shared.frames_consumed.load(Ordering::Relaxed);
+    shared
+        .end_of_audio_frame
+        .store(consumed_now, Ordering::Relaxed);
+    ALLOC_COUNT.store(0, Ordering::SeqCst);
+    render_callback_f32(
+        &mut output_f32,
+        &mut consumer,
+        &shared,
+        &mut current_gain,
+        ramp_rate,
+    );
+    let drain_allocs = ALLOC_COUNT.load(Ordering::SeqCst);
+    assert_eq!(
+        drain_allocs, 0,
+        "drain tail path allocated on heap ({drain_allocs} allocations)"
+    );
 }
