@@ -108,3 +108,42 @@ fn test_ogg_vorbis_pipeline_decoding() {
         );
     }
 }
+
+#[test]
+fn test_engine_resampling_output_frame_counts() {
+    let fixture = PathBuf::from("tests/fixtures/flac_16bit.flac");
+    assert!(fixture.exists(), "flac_16bit.flac fixture must exist");
+
+    for &dev_rate in &[44100_u32, 48000_u32, 96000_u32] {
+        let (mut engine, null_sink) = AudioEngine::new_null(dev_rate);
+        let meta = engine
+            .load_file(&fixture)
+            .unwrap_or_else(|e| panic!("Failed to load fixture at {dev_rate} Hz: {e}"));
+
+        let duration = meta
+            .duration
+            .expect("Fixture must have known duration")
+            .as_secs_f64();
+        let expected_frames = duration * dev_rate as f64;
+
+        // Play to completion using null sink
+        let mut loop_count = 0;
+        while !engine.is_track_ended() {
+            engine.fill_buffer();
+            null_sink.step(1024);
+            loop_count += 1;
+            assert!(
+                loop_count < 100_000,
+                "Playback loop exceeded safety limit without ending at {dev_rate} Hz"
+            );
+        }
+
+        let output_frames = engine.frames_written() as f64;
+        let diff = (output_frames - expected_frames).abs() / expected_frames;
+        assert!(
+            diff < 0.01,
+            "At {dev_rate} Hz: expected ~{expected_frames:.0} frames, got {output_frames:.0} (diff: {:.2}%)",
+            diff * 100.0
+        );
+    }
+}
