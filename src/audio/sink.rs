@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 pub struct CallbackShared {
     /// Total sample frames consumed monotonically by the audio sink.
     pub frames_consumed: AtomicU64,
+    /// Discard target frame for lock-free flush on seek/track change.
+    pub discard_target: AtomicU64,
     /// Linear volume gain as f32 bits.
     pub volume_target_bits: AtomicU32,
     /// Counter of underrun occurrences.
@@ -33,6 +35,7 @@ impl Default for CallbackShared {
     fn default() -> Self {
         Self {
             frames_consumed: AtomicU64::new(0),
+            discard_target: AtomicU64::new(0),
             volume_target_bits: AtomicU32::new(1.0_f32.to_bits()),
             underruns: AtomicU64::new(0),
             peak_l_bits: AtomicU32::new(0.0_f32.to_bits()),
@@ -187,6 +190,26 @@ impl AudioSink for CpalSink {
     }
 }
 
+#[inline(always)]
+fn drain_discard(consumer: &mut rtrb::Consumer<f32>, shared: &CallbackShared) {
+    let discard_target = shared.discard_target.load(Ordering::Relaxed);
+    let mut current_consumed = shared.frames_consumed.load(Ordering::Relaxed);
+
+    while current_consumed < discard_target {
+        let l = consumer.pop();
+        let r = consumer.pop();
+        if l.is_ok() && r.is_ok() {
+            current_consumed += 1;
+        } else {
+            current_consumed = discard_target;
+            break;
+        }
+    }
+    shared
+        .frames_consumed
+        .store(current_consumed, Ordering::Relaxed);
+}
+
 /// Real-time audio render callback for `f32` buffers.
 #[inline(always)]
 pub fn render_callback_f32(
@@ -196,6 +219,8 @@ pub fn render_callback_f32(
     current_gain: &mut f32,
     ramp_rate: f32,
 ) {
+    drain_discard(consumer, shared);
+
     let target_gain = if shared.paused.load(Ordering::Relaxed) {
         0.0
     } else {
@@ -262,6 +287,8 @@ pub fn render_callback_i16(
     current_gain: &mut f32,
     ramp_rate: f32,
 ) {
+    drain_discard(consumer, shared);
+
     let target_gain = if shared.paused.load(Ordering::Relaxed) {
         0.0
     } else {
@@ -326,6 +353,8 @@ pub fn render_callback_i32(
     current_gain: &mut f32,
     ramp_rate: f32,
 ) {
+    drain_discard(consumer, shared);
+
     let target_gain = if shared.paused.load(Ordering::Relaxed) {
         0.0
     } else {
@@ -409,6 +438,8 @@ impl NullSink {
         let Some(ref mut consumer) = *guard else {
             return 0;
         };
+
+        drain_discard(consumer, &self.shared);
 
         let mut consumed = 0;
         let mut block_peak_l = 0.0_f32;

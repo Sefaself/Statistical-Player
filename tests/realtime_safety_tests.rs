@@ -124,4 +124,26 @@ fn test_audio_callback_zero_allocations() {
         i32_allocs, 0,
         "render_callback_i32 allocated on heap ({i32_allocs} allocations)"
     );
+
+    // 7. Test discard / flush path (zero allocations when draining old samples)
+    for i in 0..256 {
+        let _ = producer.push((i as f32) * 0.001);
+    }
+    let consumed_now = shared.frames_consumed.load(Ordering::Relaxed);
+    shared
+        .discard_target
+        .store(consumed_now + 128, Ordering::Relaxed);
+    ALLOC_COUNT.store(0, Ordering::SeqCst);
+    render_callback_f32(
+        &mut output_f32,
+        &mut consumer,
+        &shared,
+        &mut current_gain,
+        ramp_rate,
+    );
+    let discard_allocs = ALLOC_COUNT.load(Ordering::SeqCst);
+    assert_eq!(
+        discard_allocs, 0,
+        "drain_discard path allocated on heap ({discard_allocs} allocations)"
+    );
 }

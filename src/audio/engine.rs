@@ -23,6 +23,8 @@ pub struct AudioEngine {
     current_source: Option<AudioSource>,
     current_resampler: Option<AudioResampler>,
     frames_written: u64,
+    timeline_base_frame: u64,
+    timeline_base_time: Duration,
     track_end_frame: Option<u64>,
     scratch_buf: Vec<f32>,
     resample_in_buf: Vec<f32>,
@@ -55,6 +57,8 @@ impl AudioEngine {
             current_source: None,
             current_resampler: None,
             frames_written: 0,
+            timeline_base_frame: 0,
+            timeline_base_time: Duration::ZERO,
             track_end_frame: None,
             scratch_buf: vec![0.0_f32; 4096],
             resample_in_buf: Vec::with_capacity(8192),
@@ -82,6 +86,8 @@ impl AudioEngine {
             current_source: None,
             current_resampler: None,
             frames_written: 0,
+            timeline_base_frame: 0,
+            timeline_base_time: Duration::ZERO,
             track_end_frame: None,
             scratch_buf: vec![0.0_f32; 4096],
             resample_in_buf: Vec::with_capacity(8192),
@@ -109,17 +115,10 @@ impl AudioEngine {
         let resampler = AudioResampler::new(source_rate, target_rate, 2)?;
         self.resample_delay_to_trim = resampler.output_delay();
         self.current_resampler = Some(resampler);
-        self.resample_in_buf.clear();
-        self.resample_out_offset = 0;
-        self.resample_out_len = 0;
-        self.flushing_zeros_remaining = 0;
-        self.filter_flushed = false;
-        self.source_end_of_stream = false;
 
+        self.timeline_base_frame = self.frames_written;
+        self.timeline_base_time = Duration::ZERO;
         self.current_source = Some(source);
-        self.frames_written = 0;
-        self.shared.frames_consumed.store(0, Ordering::Relaxed);
-        self.track_end_frame = None;
         self.last_error = None;
 
         info!(
@@ -398,7 +397,7 @@ impl AudioEngine {
         }
     }
 
-    /// Gets current playback position based on device frames consumed.
+    /// Gets current playback position based on device frames consumed and timeline base.
     pub fn position(&self) -> Duration {
         let consumed = self.shared.frames_consumed.load(Ordering::Relaxed);
         let dev_rate = self.sink.sample_rate();
@@ -406,7 +405,13 @@ impl AudioEngine {
             return Duration::ZERO;
         }
 
-        Duration::from_secs_f64(consumed as f64 / dev_rate as f64)
+        if consumed <= self.timeline_base_frame {
+            self.timeline_base_time
+        } else {
+            let elapsed_frames = consumed - self.timeline_base_frame;
+            self.timeline_base_time
+                + Duration::from_secs_f64(elapsed_frames as f64 / dev_rate as f64)
+        }
     }
 
     /// Seeks to a given duration in the current track.
@@ -414,24 +419,8 @@ impl AudioEngine {
         self.flush();
         if let Some(ref mut source) = self.current_source {
             source.seek(target)?;
-            if let Some(ref mut resampler) = self.current_resampler {
-                resampler.reset();
-                self.resample_delay_to_trim = resampler.output_delay();
-            }
-            self.resample_in_buf.clear();
-            self.resample_out_offset = 0;
-            self.resample_out_len = 0;
-            self.flushing_zeros_remaining = 0;
-            self.filter_flushed = false;
-            self.source_end_of_stream = false;
-
-            let dev_rate = self.sink.sample_rate();
-            let new_frame = (target.as_secs_f64() * dev_rate as f64) as u64;
-            self.frames_written = new_frame;
-            self.shared
-                .frames_consumed
-                .store(new_frame, Ordering::Relaxed);
-            self.track_end_frame = None;
+            self.timeline_base_frame = self.frames_written;
+            self.timeline_base_time = target;
 
             // Refill buffer after seek
             self.fill_buffer();
@@ -439,10 +428,24 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Flushes currently buffered audio.
+    /// Flushes currently buffered audio and signals the audio callback to discard old samples.
     pub fn flush(&mut self) {
-        // Drop any unread items from producer by letting the sink consume or recreating
-        // In rtrb, we can abandon/drain if needed, or sink will consume silence while paused
+        // Publish discard target so the callback drops any buffered unplayed samples
+        self.shared
+            .discard_target
+            .store(self.frames_written, Ordering::Release);
+
+        if let Some(ref mut resampler) = self.current_resampler {
+            resampler.reset();
+            self.resample_delay_to_trim = resampler.output_delay();
+        }
+        self.resample_in_buf.clear();
+        self.resample_out_offset = 0;
+        self.resample_out_len = 0;
+        self.flushing_zeros_remaining = 0;
+        self.filter_flushed = false;
+        self.source_end_of_stream = false;
+        self.track_end_frame = None;
     }
 
     pub fn play(&mut self) -> Result<()> {
