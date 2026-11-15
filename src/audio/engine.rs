@@ -398,16 +398,15 @@ impl AudioEngine {
         }
     }
 
-    /// Gets current playback position in source time based on frames consumed.
+    /// Gets current playback position based on device frames consumed.
     pub fn position(&self) -> Duration {
         let consumed = self.shared.frames_consumed.load(Ordering::Relaxed);
-        let sample_rate = self
-            .current_source
-            .as_ref()
-            .map(|s| s.sample_rate())
-            .unwrap_or_else(|| self.sink.sample_rate());
+        let dev_rate = self.sink.sample_rate();
+        if dev_rate == 0 {
+            return Duration::ZERO;
+        }
 
-        Duration::from_secs_f64(consumed as f64 / sample_rate as f64)
+        Duration::from_secs_f64(consumed as f64 / dev_rate as f64)
     }
 
     /// Seeks to a given duration in the current track.
@@ -426,8 +425,8 @@ impl AudioEngine {
             self.filter_flushed = false;
             self.source_end_of_stream = false;
 
-            let sample_rate = source.sample_rate();
-            let new_frame = (target.as_secs_f64() * sample_rate as f64) as u64;
+            let dev_rate = self.sink.sample_rate();
+            let new_frame = (target.as_secs_f64() * dev_rate as f64) as u64;
             self.frames_written = new_frame;
             self.shared
                 .frames_consumed
