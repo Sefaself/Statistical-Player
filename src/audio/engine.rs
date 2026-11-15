@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tracing::{debug, info};
 
+use crate::audio::resampler::AudioResampler;
 use crate::audio::sink::{AudioSink, CallbackShared, CpalSink, NullSink};
 use crate::audio::source::{AudioMetadata, AudioSource};
 
@@ -20,9 +21,18 @@ pub struct AudioEngine {
     shared: Arc<CallbackShared>,
     producer: rtrb::Producer<f32>,
     current_source: Option<AudioSource>,
+    current_resampler: Option<AudioResampler>,
     frames_written: u64,
     track_end_frame: Option<u64>,
     scratch_buf: Vec<f32>,
+    resample_in_buf: Vec<f32>,
+    resample_out_buf: Vec<f32>,
+    resample_out_offset: usize,
+    resample_out_len: usize,
+    resample_delay_to_trim: usize,
+    flushing_zeros_remaining: usize,
+    filter_flushed: bool,
+    source_end_of_stream: bool,
     last_error: Option<String>,
 }
 
@@ -43,9 +53,18 @@ impl AudioEngine {
             shared,
             producer,
             current_source: None,
+            current_resampler: None,
             frames_written: 0,
             track_end_frame: None,
             scratch_buf: vec![0.0_f32; 4096],
+            resample_in_buf: Vec::with_capacity(8192),
+            resample_out_buf: vec![0.0_f32; 16384],
+            resample_out_offset: 0,
+            resample_out_len: 0,
+            resample_delay_to_trim: 0,
+            flushing_zeros_remaining: 0,
+            filter_flushed: false,
+            source_end_of_stream: false,
             last_error: None,
         })
     }
@@ -61,9 +80,18 @@ impl AudioEngine {
             shared,
             producer,
             current_source: None,
+            current_resampler: None,
             frames_written: 0,
             track_end_frame: None,
             scratch_buf: vec![0.0_f32; 4096],
+            resample_in_buf: Vec::with_capacity(8192),
+            resample_out_buf: vec![0.0_f32; 16384],
+            resample_out_offset: 0,
+            resample_out_len: 0,
+            resample_delay_to_trim: 0,
+            flushing_zeros_remaining: 0,
+            filter_flushed: false,
+            source_end_of_stream: false,
             last_error: None,
         };
 
@@ -76,6 +104,18 @@ impl AudioEngine {
         let metadata = source.metadata().clone();
 
         self.flush();
+        let source_rate = source.sample_rate();
+        let target_rate = self.sink.sample_rate();
+        let resampler = AudioResampler::new(source_rate, target_rate, 2)?;
+        self.resample_delay_to_trim = resampler.output_delay();
+        self.current_resampler = Some(resampler);
+        self.resample_in_buf.clear();
+        self.resample_out_offset = 0;
+        self.resample_out_len = 0;
+        self.flushing_zeros_remaining = 0;
+        self.filter_flushed = false;
+        self.source_end_of_stream = false;
+
         self.current_source = Some(source);
         self.frames_written = 0;
         self.shared.frames_consumed.store(0, Ordering::Relaxed);
@@ -101,42 +141,248 @@ impl AudioEngine {
             return false;
         };
 
-        while self.producer.slots() >= 2 {
-            // Read available slots up to scratch buffer capacity
-            let slots = self.producer.slots();
-            let to_read = (slots - (slots % 2)).min(self.scratch_buf.len());
-            if to_read == 0 {
-                break;
-            }
+        // If in passthrough mode (rates equal), bypass chunking & resampling
+        let is_passthrough = self
+            .current_resampler
+            .as_ref()
+            .map(|r| r.is_passthrough())
+            .unwrap_or(true);
 
-            let read = match source.read_stereo(&mut self.scratch_buf[..to_read]) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!("AudioSource decode error: {e}");
-                    self.last_error = Some(e.to_string());
-                    self.track_end_frame = Some(self.frames_written);
+        if is_passthrough {
+            while self.producer.slots() >= 2 {
+                let slots = self.producer.slots();
+                let to_read = (slots - (slots % 2)).min(self.scratch_buf.len());
+                if to_read == 0 {
                     break;
                 }
-            };
 
-            if read == 0 {
-                // End of track reached
-                if source.is_end_of_stream() && self.track_end_frame.is_none() {
+                let read = match source.read_stereo(&mut self.scratch_buf[..to_read]) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!("AudioSource decode error: {e}");
+                        self.last_error = Some(e.to_string());
+                        self.track_end_frame = Some(self.frames_written);
+                        break;
+                    }
+                };
+
+                if read == 0 {
+                    if source.is_end_of_stream() && self.track_end_frame.is_none() {
+                        self.track_end_frame = Some(self.frames_written);
+                        debug!(
+                            "Source reached end of stream at frame {}",
+                            self.frames_written
+                        );
+                    }
+                    break;
+                }
+
+                for &sample in &self.scratch_buf[..read] {
+                    let _ = self.producer.push(sample);
+                }
+
+                self.frames_written += (read / 2) as u64;
+            }
+
+            return !self.is_track_ended();
+        }
+
+        // Resampling mode: AudioResampler converts source_rate to device_rate
+        let resampler = self.current_resampler.as_mut().unwrap();
+
+        while self.producer.slots() >= 2 {
+            // 1. Drain any remaining resampled samples from resample_out_buf first
+            if self.resample_out_offset < self.resample_out_len {
+                let available = self.resample_out_len - self.resample_out_offset;
+                let slots = self.producer.slots();
+                let to_push = (slots - (slots % 2)).min(available);
+                if to_push == 0 {
+                    break;
+                }
+                for i in 0..to_push {
+                    let _ = self
+                        .producer
+                        .push(self.resample_out_buf[self.resample_out_offset + i]);
+                }
+                self.resample_out_offset += to_push;
+                self.frames_written += (to_push / 2) as u64;
+                continue;
+            }
+
+            self.resample_out_offset = 0;
+            self.resample_out_len = 0;
+
+            let chunk_frames = resampler.input_frames_next();
+            let needed_samples = chunk_frames * 2;
+
+            // 2. Decode from source until resample_in_buf has at least chunk_frames or EOF is hit
+            while self.resample_in_buf.len() < needed_samples && !self.source_end_of_stream {
+                let slots_to_read = self.scratch_buf.len();
+                let read = match source.read_stereo(&mut self.scratch_buf[..slots_to_read]) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!("AudioSource decode error: {e}");
+                        self.last_error = Some(e.to_string());
+                        self.track_end_frame = Some(self.frames_written);
+                        return false;
+                    }
+                };
+
+                if read == 0 {
+                    if source.is_end_of_stream() {
+                        self.source_end_of_stream = true;
+                    }
+                    break;
+                }
+
+                self.resample_in_buf
+                    .extend_from_slice(&self.scratch_buf[..read]);
+            }
+
+            // 3. Process full chunk
+            if self.resample_in_buf.len() >= needed_samples {
+                let max_out_frames = resampler.output_frames_max();
+                if self.resample_out_buf.len() < max_out_frames * 2 {
+                    self.resample_out_buf.resize(max_out_frames * 2, 0.0);
+                }
+
+                let (_consumed, produced_frames) = match resampler.process_into_buffer(
+                    &self.resample_in_buf[..needed_samples],
+                    &mut self.resample_out_buf,
+                    None,
+                ) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::warn!("Resampler error: {e}");
+                        self.last_error = Some(e.to_string());
+                        self.track_end_frame = Some(self.frames_written);
+                        return false;
+                    }
+                };
+
+                self.resample_in_buf.drain(..needed_samples);
+
+                // Trim startup delay
+                let mut out_start_frame = 0;
+                let mut out_frames = produced_frames;
+                if self.resample_delay_to_trim > 0 {
+                    if out_frames <= self.resample_delay_to_trim {
+                        self.resample_delay_to_trim -= out_frames;
+                        out_frames = 0;
+                    } else {
+                        out_start_frame = self.resample_delay_to_trim;
+                        out_frames -= self.resample_delay_to_trim;
+                        self.resample_delay_to_trim = 0;
+                    }
+                }
+
+                self.resample_out_offset = out_start_frame * 2;
+                self.resample_out_len = (out_start_frame + out_frames) * 2;
+                continue;
+            }
+
+            // 4. Source reached EOF with partial frames remaining
+            if self.source_end_of_stream && !self.resample_in_buf.is_empty() {
+                let partial_frames = self.resample_in_buf.len() / 2;
+                self.resample_in_buf.resize(needed_samples, 0.0);
+
+                let max_out_frames = resampler.output_frames_max();
+                if self.resample_out_buf.len() < max_out_frames * 2 {
+                    self.resample_out_buf.resize(max_out_frames * 2, 0.0);
+                }
+
+                let (_consumed, produced_frames) = match resampler.process_into_buffer(
+                    &self.resample_in_buf[..needed_samples],
+                    &mut self.resample_out_buf,
+                    Some(partial_frames),
+                ) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::warn!("Resampler partial flush error: {e}");
+                        self.last_error = Some(e.to_string());
+                        self.track_end_frame = Some(self.frames_written);
+                        return false;
+                    }
+                };
+
+                self.resample_in_buf.clear();
+                self.flushing_zeros_remaining = resampler.output_delay();
+                self.filter_flushed = true;
+
+                let mut out_start_frame = 0;
+                let mut out_frames = produced_frames;
+                if self.resample_delay_to_trim > 0 {
+                    if out_frames <= self.resample_delay_to_trim {
+                        self.resample_delay_to_trim -= out_frames;
+                        out_frames = 0;
+                    } else {
+                        out_start_frame = self.resample_delay_to_trim;
+                        out_frames -= self.resample_delay_to_trim;
+                        self.resample_delay_to_trim = 0;
+                    }
+                }
+
+                self.resample_out_offset = out_start_frame * 2;
+                self.resample_out_len = (out_start_frame + out_frames) * 2;
+                continue;
+            }
+
+            // 5. Source reached EOF & input buffer is empty: flush filter delay tail
+            if self.source_end_of_stream && !self.filter_flushed {
+                self.filter_flushed = true;
+                self.flushing_zeros_remaining = resampler.output_delay();
+            }
+
+            if self.source_end_of_stream && self.flushing_zeros_remaining > 0 {
+                self.resample_in_buf.resize(needed_samples, 0.0);
+
+                let max_out_frames = resampler.output_frames_max();
+                if self.resample_out_buf.len() < max_out_frames * 2 {
+                    self.resample_out_buf.resize(max_out_frames * 2, 0.0);
+                }
+
+                let (_consumed, produced_frames) = match resampler.process_into_buffer(
+                    &self.resample_in_buf[..needed_samples],
+                    &mut self.resample_out_buf,
+                    Some(0),
+                ) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::warn!("Resampler zero flush error: {e}");
+                        self.last_error = Some(e.to_string());
+                        self.track_end_frame = Some(self.frames_written);
+                        return false;
+                    }
+                };
+
+                self.resample_in_buf.clear();
+
+                let frames_to_take = produced_frames.min(self.flushing_zeros_remaining);
+                self.flushing_zeros_remaining =
+                    self.flushing_zeros_remaining.saturating_sub(frames_to_take);
+
+                self.resample_out_offset = 0;
+                self.resample_out_len = frames_to_take * 2;
+                continue;
+            }
+
+            // 6. Complete
+            if self.source_end_of_stream
+                && self.resample_in_buf.is_empty()
+                && self.flushing_zeros_remaining == 0
+                && self.resample_out_offset >= self.resample_out_len
+            {
+                if self.track_end_frame.is_none() {
                     self.track_end_frame = Some(self.frames_written);
                     debug!(
-                        "Source reached end of stream at frame {}",
+                        "Resampled track reached end of stream at device frame {}",
                         self.frames_written
                     );
                 }
                 break;
             }
 
-            // Push into ring buffer
-            for &sample in &self.scratch_buf[..read] {
-                let _ = self.producer.push(sample);
-            }
-
-            self.frames_written += (read / 2) as u64;
+            break;
         }
 
         !self.is_track_ended()
@@ -169,6 +415,17 @@ impl AudioEngine {
         self.flush();
         if let Some(ref mut source) = self.current_source {
             source.seek(target)?;
+            if let Some(ref mut resampler) = self.current_resampler {
+                resampler.reset();
+                self.resample_delay_to_trim = resampler.output_delay();
+            }
+            self.resample_in_buf.clear();
+            self.resample_out_offset = 0;
+            self.resample_out_len = 0;
+            self.flushing_zeros_remaining = 0;
+            self.filter_flushed = false;
+            self.source_end_of_stream = false;
+
             let sample_rate = source.sample_rate();
             let new_frame = (target.as_secs_f64() * sample_rate as f64) as u64;
             self.frames_written = new_frame;

@@ -60,6 +60,30 @@ impl AudioResampler {
         self.inner.is_none()
     }
 
+    pub fn input_frames_next(&self) -> usize {
+        self.inner
+            .as_ref()
+            .map(|r| r.input_frames_next())
+            .unwrap_or(1024)
+    }
+
+    pub fn output_frames_max(&self) -> usize {
+        self.inner
+            .as_ref()
+            .map(|r| r.output_frames_max())
+            .unwrap_or(1024)
+    }
+
+    pub fn output_delay(&self) -> usize {
+        self.inner.as_ref().map(|r| r.output_delay()).unwrap_or(0)
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(ref mut r) = self.inner {
+            r.reset();
+        }
+    }
+
     /// Resamples an entire buffer of interleaved audio samples.
     ///
     /// When `source_rate == target_rate`, returns a clone of `input` bit-identically.
@@ -92,11 +116,13 @@ impl AudioResampler {
     }
 
     /// Resamples a chunk into a pre-allocated output slice without heap allocations.
+    /// `partial_len` can be provided when the final input chunk has fewer than `input_frames_next()` valid frames.
     /// Returns `(frames_consumed, frames_produced)`.
     pub fn process_into_buffer(
         &mut self,
         input: &[f32],
         output: &mut [f32],
+        partial_len: Option<usize>,
     ) -> Result<(usize, usize)> {
         let channels = self.channels;
         if let Some(ref mut resampler) = self.inner {
@@ -106,8 +132,20 @@ impl AudioResampler {
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let mut out_adapter = InterleavedSlice::new_mut(output, channels, out_frames)
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+            let indexing = if partial_len.is_some() {
+                Some(rubato::Indexing {
+                    input_offset: 0,
+                    output_offset: 0,
+                    active_channels_mask: None,
+                    partial_len,
+                })
+            } else {
+                None
+            };
+
             let (c, p) = resampler
-                .process_into_buffer(&in_adapter, &mut out_adapter, None)
+                .process_into_buffer(&in_adapter, &mut out_adapter, indexing.as_ref())
                 .map_err(|e| anyhow::anyhow!("Resample error: {e:?}"))?;
             Ok((c, p))
         } else {
