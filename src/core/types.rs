@@ -39,6 +39,7 @@ impl RepeatMode {
 #[derive(Debug, Clone)]
 pub enum PlayerCommand {
     Play,
+    PlayIndex(usize),
     Pause,
     Resume,
     TogglePlayPause,
@@ -76,11 +77,39 @@ pub struct TrackItem {
     pub bitrate_kbps: Option<u32>,
 }
 
+impl TrackItem {
+    /// Creates a minimal `TrackItem` from path.
+    pub fn simple(id: u64, path: PathBuf) -> Self {
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        Self {
+            id,
+            path,
+            track_no: None,
+            disc_no: None,
+            title,
+            artist: "Unknown Artist".to_string(),
+            album: "Unknown Album".to_string(),
+            year: None,
+            duration: Duration::ZERO,
+            play_count: 0,
+            codec: String::new(),
+            sample_rate: 0,
+            bit_depth: None,
+            channels: 2,
+            bitrate_kbps: None,
+        }
+    }
+}
+
 /// Snapshot published from the player core thread to the UI thread.
 ///
 /// Immutable and cheap to clone (or swap via atomic/arc). The UI redraws
 /// when `version` increments.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlayerSnapshot {
     pub version: u64,
     pub state: PlaybackState,
@@ -93,6 +122,7 @@ pub struct PlayerSnapshot {
     pub repeat_mode: RepeatMode,
     pub format_line: String,
     pub status_message: Option<String>,
+    pub error_message: Option<String>,
 }
 
 impl PlayerSnapshot {
