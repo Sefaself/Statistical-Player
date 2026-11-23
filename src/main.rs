@@ -3,7 +3,10 @@
 //! Entry point wiring settings, logging, crash handling, and eframe native window.
 
 use eframe::egui;
-use statistical_player::core::Settings;
+use statistical_player::audio::AudioThread;
+use statistical_player::core::{
+    PlaybackState, PlayerCommand, PlayerCore, RepeatMode, Settings, TrackItem,
+};
 use statistical_player::logging::{init_logging, install_panic_hook};
 use statistical_player::ui::StatisticalPlayerApp;
 use std::time::Duration;
@@ -92,6 +95,49 @@ fn main() -> eframe::Result {
         let seek = seek_secs.map(std::time::Duration::from_secs_f64);
         if let Err(e) = run_play_cli(&file, seek) {
             eprintln!("Playback error on {}: {e:#}", file.display());
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    } else if args.len() >= 2 && args[1] == "queue" {
+        if args.len() < 3 {
+            eprintln!("Usage: cargo run -- queue <file1> <file2> ... [--repeat off|track|queue]");
+            std::process::exit(1);
+        }
+        let mut files = Vec::new();
+        let mut repeat_mode = RepeatMode::Off;
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "--repeat" {
+                i += 1;
+                if i < args.len() {
+                    match args[i].to_lowercase().as_str() {
+                        "off" => repeat_mode = RepeatMode::Off,
+                        "track" => repeat_mode = RepeatMode::Track,
+                        "queue" => repeat_mode = RepeatMode::Queue,
+                        other => {
+                            eprintln!(
+                                "Invalid repeat mode: '{other}'. Expected off, track, or queue."
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Missing value for --repeat");
+                    std::process::exit(1);
+                }
+            } else {
+                files.push(std::path::PathBuf::from(&args[i]));
+            }
+            i += 1;
+        }
+
+        if files.is_empty() {
+            eprintln!("Usage: cargo run -- queue <file1> <file2> ... [--repeat off|track|queue]");
+            std::process::exit(1);
+        }
+
+        if let Err(e) = run_queue_cli(&files, repeat_mode) {
+            eprintln!("Queue error: {e:#}");
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -242,6 +288,109 @@ fn run_play_cli(file: &std::path::Path, seek: Option<std::time::Duration>) -> an
         dev_rate,
         engine.underruns(),
     );
+
+    Ok(())
+}
+
+fn run_queue_cli(files: &[std::path::PathBuf], repeat_mode: RepeatMode) -> anyhow::Result<()> {
+    println!("Initializing audio output device...");
+    let audio = AudioThread::spawn()?;
+    let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+    let wake_ui = Box::new(move || {
+        let _ = wake_tx.send(());
+    });
+
+    let player = PlayerCore::spawn(audio, wake_ui);
+
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let r = std::sync::Arc::clone(&running);
+    if let Err(e) = ctrlc::set_handler(move || {
+        r.store(false, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        tracing::warn!("Failed to install Ctrl+C signal handler: {e}");
+    }
+
+    player.send(PlayerCommand::SetRepeat(repeat_mode))?;
+
+    let tracks: Vec<TrackItem> = files
+        .iter()
+        .enumerate()
+        .map(|(id, path)| TrackItem::simple(id as u64, path.clone()))
+        .collect();
+
+    println!(
+        "Queued {} track(s) (Repeat mode: {:?})",
+        tracks.len(),
+        repeat_mode
+    );
+    for (i, t) in tracks.iter().enumerate() {
+        println!("  {}. {}", i + 1, t.path.display());
+    }
+    println!("Press Ctrl+C to stop.\n");
+
+    player.send(PlayerCommand::ReplaceQueue(tracks))?;
+
+    let mut last_state = None;
+    let mut last_index = None;
+    let mut last_generation = 0_u32;
+    let mut loops_completed = 0;
+    let total_tracks = files.len();
+
+    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = wake_rx.recv_timeout(Duration::from_millis(50));
+        let snap = player.snapshot();
+        let current_gen = player.status().generation();
+
+        // Print track change
+        if current_gen != last_generation && current_gen > 0 {
+            if let Some(idx) = snap.current_index {
+                // If we wrapped around to track 0 from the last track
+                if last_index == Some(total_tracks.saturating_sub(1))
+                    && idx == 0
+                    && last_generation > 0
+                {
+                    loops_completed += 1;
+                    println!("\n--- Completed loop {} of queue ---", loops_completed);
+                    if repeat_mode == RepeatMode::Queue && loops_completed >= 2 {
+                        println!("Queue mode reached limit of 2 full loops. Stopping.");
+                        let _ = player.send(PlayerCommand::Stop);
+                        break;
+                    }
+                }
+
+                let track_title = snap
+                    .current_track()
+                    .map(|t| t.path.display().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                println!("[Track #{}] Loading: {}", idx + 1, track_title);
+                last_index = Some(idx);
+            }
+            last_generation = current_gen;
+        }
+
+        // Print state change
+        if last_state != Some(snap.state) {
+            println!("[State] {:?}", snap.state);
+            last_state = Some(snap.state);
+
+            if snap.state == PlaybackState::Stopped && last_generation > 0 {
+                if let Some(ref err) = snap.error_message {
+                    eprintln!("[Error] {err}");
+                } else if let Some(ref status) = snap.status_message {
+                    println!("[Status] {status}");
+                }
+                break;
+            }
+        }
+    }
+
+    if !running.load(std::sync::atomic::Ordering::SeqCst) {
+        println!("\nPlayback stopped by user (Ctrl+C).");
+        let _ = player.send(PlayerCommand::Stop);
+    }
+
+    let underruns = player.status().underruns();
+    println!("\nPlayback finished. Final underrun count: {}", underruns);
 
     Ok(())
 }
