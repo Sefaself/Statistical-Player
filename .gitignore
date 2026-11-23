@@ -10,3 +10,4 @@ cache/
 backups/
 .DS_Store
 Thumbs.db
+/docs/audit-report.md
