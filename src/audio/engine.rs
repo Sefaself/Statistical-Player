@@ -530,6 +530,17 @@ impl AudioEngine {
         let val = self.shared.end_of_audio_frame.load(Ordering::Relaxed);
         if val == u64::MAX { None } else { Some(val) }
     }
+
+    /// Exposes the shared atomics between the engine and audio callback.
+    pub fn shared(&self) -> &Arc<CallbackShared> {
+        &self.shared
+    }
+
+    /// Returns true if the ring buffer is less than half full.
+    pub fn is_buffer_below_half(&self) -> bool {
+        let capacity = ring_buffer_capacity(self.sink.sample_rate());
+        self.producer.slots() >= capacity / 2
+    }
 }
 
 /// Helper wrapper so Arc<NullSink> can be boxed as dyn AudioSink.
