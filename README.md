@@ -1,58 +1,62 @@
 # Statistical Player
 
-A fast, opinionated desktop music player written in pure Rust (eframe/egui, Symphonia, CPAL, and rusqlite), modeled on foobar2000's density and responsiveness with a fixed modern layout.
+A fast, (yet-to-be)good-looking, cross-platform desktop music player written in pure Rust, inspired by my own heavily customized foobar2000 layout :3
 
-## How to run and test
+> **Status: very early development (Phase 1, pre-v0.1).** The audio engine and player core work and are tested, but there is no graphical interface yet. As of right now you can only drive it from the command line.
 
-### 1. Build
-Build the debug development executable:
+## Goals
+
+- One fixed layout: queue on the left, coverflow-like interface on top, tabbed visualizers in the center, control bar with waveform seekbar at the bottom.
+- Folder-based library: one folder is one album (as of right now).
+- Full-precision decoding (FLAC, MP3, AAC in M4A, WAV, OGG Vorbis) in pure Rust, no C audio dependencies.
+- Low CPU and battery use, even when minimized.
+- Exact Windows, macOS and Linux support (CI builds all three).
+
+The full developement plan is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## What works as of right now (11/23/2026)
+
+- Decoding with [symphonia](https://github.com/pdeljanov/Symphonia), output with [cpal](https://github.com/RustAudio/cpal), through a lock-free ring buffer.
+- Resampling to the device sample rate, seeking, end-of-track drain.
+- A dedicated audio thread and a player core thread (queue, repeat modes, next/previous, one-shot randomize, skip-on-failure).
+- A library audit tool that checks every file in a folder.
+- Real-time safety test: the audio callback is checked for zero allocations.
+
+Not yet: GUI, library database, coverflow, visualizers, lyrics, statistics, gapless playback.
+
+## Build and run
+
+Requires a current stable Rust toolchain. On Windows you also need the Visual Studio C++ Build Tools. On Linux you need ALSA development headers (`libasound2-dev`).
+
 ```bash
-cargo build
+cargo run                                   # themed window (placeholder UI test)
+cargo run -- audit <folder>                 # check every audio file in a folder
+cargo run -- play <file>                    # play one file with position and peak readout
+cargo run -- queue <f1> <f2> ... [--repeat off|track|queue]
+cargo test                                  # full test suite (uses a null audio sink)
 ```
 
-### 2. Run GUI
-Launch the desktop application window (native GUI with Poppins typography and theme toggle):
-```bash
-cargo run
+## Project layout
+
+```text
+src/core/      player core thread, queue, commands, snapshot, settings
+src/audio/     decoder, resampler, audio thread, sinks
+src/library/   folder loader, audit tool
+src/ui/        egui window, theme, fonts
+docs/          roadmap, decisions log, phase plans
 ```
 
-### 3. Audit a Music Folder
-Recursively audit an audio folder, decode ~1 second of every track, inspect AAC audio object types (LC / HE-AAC / HE-AACv2), and report errors or missing tags:
-```bash
-# Output to docs/audit-report.md by default
-cargo run -- audit tests/fixtures
+## Contributing
 
-# Output to a custom report path (e.g. *.local.md which is ignored by git)
-cargo run -- audit "C:\path\to\your\music" --out audit.local.md
-```
+This is a personal learning project and development is slow and deliberate (one small phase at a time). Issues and suggestions are welcome, but do expect slow replies...
 
-### 4. Play an Audio File (CLI)
-Play any supported audio file (`.flac`, `.mp3`, `.m4a`, `.wav`, `.ogg`) directly to the system default output device with live position and VU peak levels:
-```bash
-# Play from start (Ctrl+C to quit)
-cargo run -- play tests/fixtures/flac_16bit.flac
+## License
 
-# Seek to a specific timestamp in seconds
-cargo run -- play tests/fixtures/flac_16bit.flac --seek 1.0
-```
+The bundled Poppins font is under the SIL Open Font License (see `assets/fonts/OFL.txt`).3
 
-### 5. Automated Tests & Code Quality
-Run all unit and integration tests (including audio pipeline, real-time zero-allocation verification, and audit tests):
-```bash
-cargo test
-```
+## Why!?
 
-Run complete format, lint, and test verification:
-```bash
-cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
-```
+I was sick and tired of having 2 different music players between Windows, macOS and Linux, i wanted something that is exactly whan i need, consistent across all platforms.
+I know there are plenty of other good music players out there but none seem satisfy my stupid specific needs and quirks.
 
-### 6. Regenerate Test Fixtures
-If needed, regenerate the 2-second stereo sine fixtures (440 Hz left, 880 Hz right) using FFmpeg:
-```powershell
-# Windows PowerShell
-powershell -ExecutionPolicy Bypass -File tests/fixtures/generate_fixtures.ps1
-
-# Linux / macOS
-bash tests/fixtures/generate_fixtures.sh
-```
+I'm building this for me, honestly I don't expect anyone to actually use this, but if you find it useful you may as well use it.
