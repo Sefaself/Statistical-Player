@@ -6,6 +6,7 @@ use eframe::egui;
 use statistical_player::core::Settings;
 use statistical_player::logging::{init_logging, install_panic_hook};
 use statistical_player::ui::StatisticalPlayerApp;
+use std::time::Duration;
 
 fn main() -> eframe::Result {
     // Check for CLI subcommands before initializing the GUI
@@ -178,8 +179,9 @@ fn run_play_cli(file: &std::path::Path, seek: Option<std::time::Duration>) -> an
 
     println!("Playing: {} (Press Ctrl+C to quit)\n", file.display());
     engine.play()?;
+    let playback_start = std::time::Instant::now();
 
-    let mut last_print = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut last_print = playback_start - std::time::Duration::from_secs(1);
     let total_dur = meta.duration.unwrap_or_default();
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {
@@ -225,6 +227,21 @@ fn run_play_cli(file: &std::path::Path, seek: Option<std::time::Duration>) -> an
     if !running.load(std::sync::atomic::Ordering::SeqCst) {
         println!("\nPlayback stopped by user (Ctrl+C).");
     }
+
+    let wall_clock = playback_start.elapsed();
+    let audio_length = engine
+        .position()
+        .saturating_sub(seek.unwrap_or(Duration::ZERO));
+
+    println!(
+        "\nPlayback summary:\n  - Audio length:    {} ({:.2} s)\n  - Wall-clock time: {} ({:.2} s)\n  - Device rate:     {} Hz\n  - Underrun count:  {}",
+        format_duration(audio_length),
+        audio_length.as_secs_f64(),
+        format_duration(wall_clock),
+        wall_clock.as_secs_f64(),
+        dev_rate,
+        engine.underruns(),
+    );
 
     Ok(())
 }
