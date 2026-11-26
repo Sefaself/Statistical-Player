@@ -141,6 +141,18 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
         std::process::exit(0);
+    } else if args.len() >= 2 && args[1] == "scan" {
+        if args.len() < 3 {
+            eprintln!("Usage: cargo run -- scan <folder>");
+            std::process::exit(1);
+        }
+        let folder = std::path::PathBuf::from(&args[2]);
+        if !folder.is_dir() {
+            eprintln!("Error: '{}' is not a valid directory.", folder.display());
+            std::process::exit(1);
+        }
+        run_scan_cli(&folder);
+        std::process::exit(0);
     }
 
     // 1. Load settings (or default if absent/unreadable)
@@ -393,4 +405,52 @@ fn run_queue_cli(files: &[std::path::PathBuf], repeat_mode: RepeatMode) -> anyho
     println!("\nPlayback finished. Final underrun count: {}", underruns);
 
     Ok(())
+}
+
+fn run_scan_cli(folder: &std::path::Path) {
+    println!("Scanning folder: {}", folder.display());
+    let start = std::time::Instant::now();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let handle = statistical_player::library::load_folder(folder.to_path_buf(), tx);
+
+    let mut time_to_first_batch: Option<Duration> = None;
+    let mut batch_count = 0usize;
+
+    while let Ok(ev) = rx.recv() {
+        match ev {
+            statistical_player::library::LoaderEvent::Batch(batch) => {
+                batch_count += 1;
+                if time_to_first_batch.is_none() {
+                    let t = start.elapsed();
+                    time_to_first_batch = Some(t);
+                    println!(
+                        "First batch received in {:.3} s ({} tracks)",
+                        t.as_secs_f64(),
+                        batch.len()
+                    );
+                }
+            }
+            statistical_player::library::LoaderEvent::Done {
+                total,
+                skipped,
+                elapsed,
+                ..
+            } => {
+                let first_str = time_to_first_batch
+                    .map(|d| format!("{:.3} s", d.as_secs_f64()))
+                    .unwrap_or_else(|| "N/A (0 batches)".to_string());
+                println!(
+                    "\nScan complete:\n  - Time to first batch: {}\n  - Total time:          {:.3} s\n  - Batches emitted:     {}\n  - Track count:         {}\n  - Skipped count:       {}",
+                    first_str,
+                    elapsed.as_secs_f64(),
+                    batch_count,
+                    total,
+                    skipped
+                );
+                break;
+            }
+        }
+    }
+
+    let _ = handle.join();
 }
