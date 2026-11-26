@@ -23,6 +23,8 @@ This file records key technical choices, library additions, and justifications a
 | `walkdir` | Recursive folder directory walking | std::fs lacks ergonomic recursive directory walking | Standard Rust recursive directory iterator | Phase 1 |
 | `ctrlc` | Cross-platform Ctrl+C signal handling for CLI subcommands | std has no cross-platform signal handling APIs | De-facto standard signal handler crate | Phase 1 |
 | `rubato` | High-quality audio sample rate conversion | std has no sample rate conversion or DSP sinc/FFT resampling algorithms | Realtime-safe sinc/FFT audio resampler specified in roadmap Section 5 & 7 | Phase 1 |
+| `egui_extras` | Virtualized table (`TableBuilder`) for large track queues | Core `egui` does not include a virtualized multi-column table widget | Official companion crate for `egui`, required to render 2,670+ rows at 24px smoothly | Phase 1 |
+| `rfd` | Native OS folder picker dialog (`FileDialog::pick_folder`) | `std` and `egui` have no native OS file/folder dialog | Lightweight pure-Rust / native COM-backed dialog crate; invoked off the UI thread | Phase 1 |
 
 ## Architecture Decisions
 

@@ -180,7 +180,16 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Statistical Player",
         native_options,
-        Box::new(|cc| Ok(Box::new(StatisticalPlayerApp::new(cc, settings)))),
+        Box::new(|cc| {
+            let audio = AudioThread::spawn()
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("{e:#}")))?;
+            let ctx = cc.egui_ctx.clone();
+            let wake_ui = Box::new(move || {
+                ctx.request_repaint();
+            });
+            let player = PlayerCore::spawn(audio, wake_ui);
+            Ok(Box::new(StatisticalPlayerApp::new(cc, settings, player)))
+        }),
     )
 }
 
